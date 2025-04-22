@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Educational System</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .container {
+            margin-bottom: 20px;
+            padding: 20px;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+        }
+        input, select {
+            width: 100%;
+            padding: 8px;
+            box-sizing: border-box;
+        }
+        button {
+            padding: 10px 20px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        #profileContainer {
+            display: none;
+        }
+        .error {
+            color: red;
+            margin-top: 10px;
+        }
+        .success {
+            color: green;
+            margin-top: 10px;
+        }
+        .password-requirements {
+            font-size: 0.8em;
+            color: #666;
+            margin-top: 5px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Educational System</h1>
+
+    <!-- Registration Form -->
+    <div class="container" id="registerContainer">
+        <h2>Register</h2>
+        <div class="form-group">
+            <label for="regName">Name:</label>
+            <input type="text" id="regName" required>
+        </div>
+        <div class="form-group">
+            <label for="regEmail">Email:</label>
+            <input type="email" id="regEmail" required>
+        </div>
+        <div class="form-group">
+            <label for="regPassword">Password:</label>
+            <input type="password" id="regPassword" required>
+            <div class="password-requirements">
+                Password must be at least 8 characters long, contain at least one uppercase letter and one number.
+            </div>
+        </div>
+        <div class="form-group">
+            <label for="regRole">Role:</label>
+            <select id="regRole" onchange="toggleRoleFields()">
+                <option value="student">Student</option>
+                <option value="teacher">Teacher</option>
+                <option value="admin">Admin</option>
+            </select>
+        </div>
+
+        <!-- Student-specific fields -->
+        <div id="studentFields" class="form-group">
+            <label for="gradeLevel">Grade Level:</label>
+            <input type="text" id="gradeLevel">
+            <label for="enrollmentYear">Enrollment Year:</label>
+            <input type="number" id="enrollmentYear">
+        </div>
+
+        <!-- Teacher-specific fields -->
+        <div id="teacherFields" class="form-group" style="display: none;">
+            <label for="department">Department:</label>
+            <input type="text" id="department">
+        </div>
+
+        <button onclick="register()">Register</button>
+        <div id="registerMessage"></div>
+    </div>
+
+    <!-- Login Form -->
+    <div class="container" id="loginContainer">
+        <h2>Login</h2>
+        <div class="form-group">
+            <label for="loginEmail">Email:</label>
+            <input type="email" id="loginEmail" required>
+        </div>
+        <div class="form-group">
+            <label for="loginPassword">Password:</label>
+            <input type="password" id="loginPassword" required>
+        </div>
+        <button onclick="login()">Login</button>
+        <div id="loginMessage"></div>
+    </div>
+
+    <!-- Profile Section -->
+    <div class="container" id="profileContainer">
+        <h2>Profile</h2>
+        <div id="profileData"></div>
+        <button onclick="logout()">Logout</button>
+    </div>
+
+    <script>
+        const API_BASE_URL = 'http://localhost:8080/api';
+        let token = localStorage.getItem('token');
+
+        // Check if user is already logged in
+        window.onload = function() {
+            if (token) {
+                checkAuth();
+            }
+        };
+
+        function toggleRoleFields() {
+            const role = document.getElementById('regRole').value;
+            document.getElementById('studentFields').style.display = role === 'student' ? 'block' : 'none';
+            document.getElementById('teacherFields').style.display = role === 'teacher' ? 'block' : 'none';
+        }
+
+        function validatePassword(password) {
+            // Check for at least 8 characters
+            if (password.length < 8) {
+                return "Password must be at least 8 characters long";
+            }
+            
+            // Check for at least one uppercase letter
+            if (!/[A-Z]/.test(password)) {
+                return "Password must contain at least one uppercase letter";
+            }
+            
+            // Check for at least one number
+            if (!/[0-9]/.test(password)) {
+                return "Password must contain at least one number";
+            }
+            
+            return ""; // Empty string means validation passed
+        }
+
+        async function register() {
+            const password = document.getElementById('regPassword').value;
+            const passwordError = validatePassword(password);
+            
+            if (passwordError) {
+                document.getElementById('registerMessage').className = 'error';
+                document.getElementById('registerMessage').textContent = passwordError;
+                return;
+            }
+            
+            const role = document.getElementById('regRole').value;
+            const user = {
+                name: document.getElementById('regName').value,
+                email: document.getElementById('regEmail').value,
+                password: password,
+                role: role
+            };
+
+            const request = { user };
+
+            if (role === 'student') {
+                request.student = {
+                    grade_level: document.getElementById('gradeLevel').value,
+                    enrollment_year: parseInt(document.getElementById('enrollmentYear').value)
+                };
+            } else if (role === 'teacher') {
+                request.teacher = {
+                    dept: document.getElementById('department').value
+                };
+            }
+
+            try {
+                const response = await fetch(`${API_BASE_URL}/register`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(request)
+                });
+
+                const data = await response.json();
+                const messageDiv = document.getElementById('registerMessage');
+                
+                if (response.ok) {
+                    messageDiv.className = 'success';
+                    messageDiv.textContent = data.message;
+                } else {
+                    messageDiv.className = 'error';
+                    messageDiv.textContent = data.error || 'Registration failed';
+                }
+            } catch (error) {
+                document.getElementById('registerMessage').className = 'error';
+                document.getElementById('registerMessage').textContent = 'Error: ' + error.message;
+            }
+        }
+
+        async function login() {
+            const request = {
+                email: document.getElementById('loginEmail').value,
+                password: document.getElementById('loginPassword').value
+            };
+
+            try {
+                const response = await fetch(`${API_BASE_URL}/login`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(request)
+                });
+
+                const data = await response.json();
+                const messageDiv = document.getElementById('loginMessage');
+
+                if (response.ok) {
+                    token = data.token;
+                    localStorage.setItem('token', token);
+                    messageDiv.className = 'success';
+                    messageDiv.textContent = 'Login successful';
+                    await showProfile(); // Call showProfile after successful login
+                } else {
+                    messageDiv.className = 'error';
+                    messageDiv.textContent = 'Login failed: ' + (data.error || 'Invalid credentials');
+                }
+            } catch (error) {
+                document.getElementById('loginMessage').className = 'error';
+                document.getElementById('loginMessage').textContent = 'Error: ' + error.message;
+            }
+        }
+
+        async function checkAuth() {
+            try {
+                const response = await fetch(`${API_BASE_URL}/checkauth`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    if (data.authenticated) {
+                        await showProfile();
+                    }
+                } else {
+                    logout();
+                }
+            } catch (error) {
+                console.error('Auth check failed:', error);
+                logout();
+            }
+        }
+
+        async function showProfile() {
+            try {
+                // Get profile data
+                const profileResponse = await fetch(`${API_BASE_URL}/profile`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                const profileData = await profileResponse.json();
+
+                // Get auth data
+                const authResponse = await fetch(`${API_BASE_URL}/checkauth`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                const authData = await authResponse.json();
+
+                document.getElementById('registerContainer').style.display = 'none';
+                document.getElementById('loginContainer').style.display = 'none';
+                document.getElementById('profileContainer').style.display = 'block';
+
+                const profileDiv = document.getElementById('profileData');
+                let html = `
+                    <p><strong>User ID:</strong> ${authData.user_id}</p>
+                    <p><strong>Name:</strong> ${profileData.user.name}</p>
+                    <p><strong>Email:</strong> ${profileData.user.email}</p>
+                    <p><strong>Role:</strong> ${profileData.user.role}</p>
+                    <p><strong>Database Connection:</strong> ${authData.db_connection}</p>
+                    <p><strong>Contact Number:</strong> ${profileData.user.contact_number || 'Not provided'}</p>
+                    <p><strong>Organization:</strong> ${profileData.user.org || 'Not provided'}</p>
+                    <p><strong>Created At:</strong> ${profileData.user.created_at || 'Not available'}</p>
+                `;
+
+                if (profileData.student) {
+                    html += `
+                        <h3>Student Details</h3>
+                        <p><strong>Student ID:</strong> ${profileData.student.student_id}</p>
+                        <p><strong>Grade Level:</strong> ${profileData.student.grade_level}</p>
+                        <p><strong>Enrollment Year:</strong> ${profileData.student.enrollment_year}</p>
+                    `;
+                } else if (profileData.teacher) {
+                    html += `
+                        <h3>Teacher Details</h3>
+                        <p><strong>Teacher ID:</strong> ${profileData.teacher.teacher_id}</p>
+                        <p><strong>Department:</strong> ${profileData.teacher.dept}</p>
+                    `;
+                }
+
+                profileDiv.innerHTML = html;
+            } catch (error) {
+                console.error('Profile fetch failed:', error);
+                logout();
+            }
+        }
+
+        function logout() {
+            localStorage.removeItem('token');
+            token = null;
+            document.getElementById('registerContainer').style.display = 'block';
+            document.getElementById('loginContainer').style.display = 'block';
+            document.getElementById('profileContainer').style.display = 'none';
+            document.getElementById('profileData').innerHTML = '';
+        }
+    </script>
+</body>
+</html>
