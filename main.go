@@ -97,6 +97,12 @@ func main() {
 		protected.GET("/assignments/:id/submissions", handlers.GetAssignmentSubmissionsHandler)
 		protected.POST("/submissions/:id/grade", handlers.GradeSubmissionHandler)
 		protected.POST("/assignments/:id/bulk-grade", handlers.BulkGradeSubmissionsHandler)
+
+		protected.POST("/materials", handlers.CreateMaterialHandler)
+		protected.GET("/classrooms/:id/materials", handlers.GetMaterialsByCourseHandler)
+		protected.GET("/materials/:id", handlers.GetMaterialHandler)
+		protected.PUT("/materials/:id", handlers.UpdateMaterialHandler)
+		protected.DELETE("/materials/:id", handlers.DeleteMaterialHandler)
 	}
 
 	// Catch-all for 404 errors to log unhandled routes
