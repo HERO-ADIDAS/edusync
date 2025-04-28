@@ -4,110 +4,211 @@ import (
 	"database/sql"
 	"log"
 	"net/http"
-	"net/url"
 	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
+
+	"edusync/models"
 )
 
-// MaterialResponse represents the response structure for material operations
-type MaterialResponse struct {
-	MaterialID  int       `json:"material_id"`
-	CourseID    int       `json:"course_id"`
-	Title       string    `json:"title"`
-	Type        string    `json:"type"`
-	FilePath    string    `json:"file_path"` // Stores URL link
-	UploadedAt  time.Time `json:"uploaded_at"`
-	Description string    `json:"description"`
-}
-
-// CreateMaterialRequest represents the request body for creating a material
-type CreateMaterialRequest struct {
-	CourseID    int    `json:"course_id" binding:"required"`
-	Title       string `json:"title" binding:"required"`
-	Type        string `json:"type" binding:"required"`
-	FilePath    string `json:"file_path" binding:"required,url"` // Enforces URL validation
-	Description string `json:"description"`
-}
-
-// UpdateMaterialRequest represents the request body for updating a material
-type UpdateMaterialRequest struct {
-	Title       string `json:"title"`
-	Type        string `json:"type"`
-	FilePath    string `json:"file_path" binding:"omitempty,url"` // Optional, enforces URL if provided
-	Description string `json:"description"`
-}
-
-// CreateMaterialHandler creates a new material (link only)
+// CreateMaterialHandler creates a new material
 func CreateMaterialHandler(c *gin.Context) {
-	teacherID := c.MustGet("userID").(int)
-	role := c.MustGet("role").(string)
-
+	userID, _ := c.Get("userID")
+	role, _ := c.Get("role")
 	if role != "teacher" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Access denied: Only teachers can create materials"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "Only teachers can create materials"})
 		return
 	}
 
-	db := c.MustGet("db").(*sql.DB)
-
-	var materialReq CreateMaterialRequest
-	if err := c.ShouldBindJSON(&materialReq); err != nil {
+	var req models.Material
+	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body: " + err.Error()})
 		return
 	}
 
-	// Verify teacher ownership of the course
-	var exists bool
-	err := db.QueryRow(
-		`SELECT EXISTS(
-			SELECT 1 FROM classroom c
-			JOIN teacher t ON c.teacher_id = t.teacher_id
-			WHERE c.course_id = ? AND t.user_id = ?
-		)`, materialReq.CourseID, teacherID).Scan(&exists)
+	db := c.MustGet("db").(*sql.DB)
+	var teacherID int
+	err := db.QueryRow(`
+		SELECT teacher_id FROM teacher 
+		WHERE user_id = ? AND archive_delete_flag = TRUE`, userID).Scan(&teacherID)
 	if err != nil {
-		log.Printf("Database error checking course ownership: %v", err)
+		log.Printf("Error querying teacher: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Teacher not found"})
+		return
+	}
+
+	// Check if the teacher is authorized to create materials for this classroom
+	var exists bool
+	err = db.QueryRow(`
+		SELECT EXISTS (
+			SELECT 1 FROM classroom 
+			WHERE course_id = ? AND teacher_id = ? AND archive_delete_flag = TRUE
+		)`, req.CourseID, teacherID).Scan(&exists)
+	if err != nil {
+		log.Printf("Error checking classroom authorization: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
 		return
 	}
 	if !exists {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Course not found or access denied"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "Unauthorized to create materials for this classroom"})
 		return
 	}
 
-	// Insert new material
-	result, err := db.Exec(
-		`INSERT INTO material (course_id, title, type, file_path, description, uploaded_at)
-		VALUES (?, ?, ?, ?, ?, NOW())`,
-		materialReq.CourseID, materialReq.Title, materialReq.Type, materialReq.FilePath, materialReq.Description,
-	)
+	result, err := db.Exec(`
+		INSERT INTO material (course_id, title, type, file_path, uploaded_at, description, archive_delete_flag)
+		VALUES (?, ?, ?, ?, ?, ?, TRUE)`,
+		req.CourseID, req.Title, req.Type, req.FilePath, time.Now(), req.Description)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error creating material"})
 		log.Printf("Error inserting material: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
 		return
 	}
 
-	materialID, err := result.LastInsertId()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error retrieving material ID"})
-		log.Printf("Error getting last insert ID: %v", err)
-		return
-	}
-
-	c.JSON(http.StatusCreated, gin.H{"material_id": materialID, "message": "Material created successfully"})
+	materialID, _ := result.LastInsertId()
+	c.JSON(http.StatusOK, gin.H{
+		"material_id": materialID,
+		"course_id":   req.CourseID,
+		"title":       req.Title,
+		"type":        req.Type,
+		"file_path":   req.FilePath,
+		"description": req.Description,
+	})
 }
 
-// GetMaterialsByCourseHandler retrieves all materials for a specific course
-func GetMaterialsByCourseHandler(c *gin.Context) {
-	teacherID := c.MustGet("userID").(int)
-	role := c.MustGet("role").(string)
-
+// UpdateMaterialHandler updates a material
+func UpdateMaterialHandler(c *gin.Context) {
+	userID, _ := c.Get("userID")
+	role, _ := c.Get("role")
 	if role != "teacher" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Access denied: Only teachers can view materials"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "Only teachers can update materials"})
+		return
+	}
+
+	materialID, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid material ID"})
+		return
+	}
+
+	var req models.Material
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body: " + err.Error()})
 		return
 	}
 
 	db := c.MustGet("db").(*sql.DB)
+	var teacherID int
+	err = db.QueryRow(`
+		SELECT teacher_id FROM teacher 
+		WHERE user_id = ? AND archive_delete_flag = TRUE`, userID).Scan(&teacherID)
+	if err != nil {
+		log.Printf("Error querying teacher: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Teacher not found"})
+		return
+	}
+
+	// Check if the teacher is authorized to update this material
+	var exists bool
+	err = db.QueryRow(`
+		SELECT EXISTS (
+			SELECT 1 FROM material m
+			JOIN classroom c ON m.course_id = c.course_id
+			WHERE m.material_id = ? AND c.teacher_id = ? AND m.archive_delete_flag = TRUE
+			AND c.archive_delete_flag = TRUE
+		)`, materialID, teacherID).Scan(&exists)
+	if err != nil {
+		log.Printf("Error checking material authorization: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		return
+	}
+	if !exists {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Unauthorized to update this material"})
+		return
+	}
+
+	_, err = db.Exec(`
+		UPDATE material 
+		SET title = ?, type = ?, file_path = ?, description = ?
+		WHERE material_id = ? AND archive_delete_flag = TRUE`,
+		req.Title, req.Type, req.FilePath, req.Description, materialID)
+	if err != nil {
+		log.Printf("Error updating material: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"material_id": materialID,
+		"title":       req.Title,
+		"type":        req.Type,
+		"file_path":   req.FilePath,
+		"description": req.Description,
+	})
+}
+
+// DeleteMaterialHandler deletes a material
+func DeleteMaterialHandler(c *gin.Context) {
+	userID, _ := c.Get("userID")
+	role, _ := c.Get("role")
+	if role != "teacher" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Only teachers can delete materials"})
+		return
+	}
+
+	materialID, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid material ID"})
+		return
+	}
+
+	db := c.MustGet("db").(*sql.DB)
+	var teacherID int
+	err = db.QueryRow(`
+		SELECT teacher_id FROM teacher 
+		WHERE user_id = ? AND archive_delete_flag = TRUE`, userID).Scan(&teacherID)
+	if err != nil {
+		log.Printf("Error querying teacher: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Teacher not found"})
+		return
+	}
+
+	// Check if the teacher is authorized to delete this material
+	var exists bool
+	err = db.QueryRow(`
+		SELECT EXISTS (
+			SELECT 1 FROM material m
+			JOIN classroom c ON m.course_id = c.course_id
+			WHERE m.material_id = ? AND c.teacher_id = ? AND m.archive_delete_flag = TRUE
+			AND c.archive_delete_flag = TRUE
+		)`, materialID, teacherID).Scan(&exists)
+	if err != nil {
+		log.Printf("Error checking material authorization: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		return
+	}
+	if !exists {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Unauthorized to delete this material"})
+		return
+	}
+
+	_, err = db.Exec(`
+		UPDATE material 
+		SET archive_delete_flag = FALSE 
+		WHERE material_id = ? AND archive_delete_flag = TRUE`, materialID)
+	if err != nil {
+		log.Printf("Error deleting material: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Material deleted"})
+}
+
+// GetMaterialsByClassroomHandler lists materials for a classroom
+func GetMaterialsByClassroomHandler(c *gin.Context) {
+	userID, _ := c.Get("userID")
+	role, _ := c.Get("role")
 
 	courseID, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
@@ -115,242 +216,87 @@ func GetMaterialsByCourseHandler(c *gin.Context) {
 		return
 	}
 
-	log.Printf("Logged in teacher ID: %d", teacherID)
-	log.Printf("Checking materials for course %d by teacher %d", courseID, teacherID)
+	db := c.MustGet("db").(*sql.DB)
 
-	// Verify teacher ownership of the course
-	var exists bool
-	err = db.QueryRow(
-		`SELECT EXISTS(
-			SELECT 1 FROM classroom c
-			JOIN teacher t ON c.teacher_id = t.teacher_id
-			WHERE c.course_id = ? AND t.user_id = ?
-		)`, courseID, teacherID).Scan(&exists)
-	if err != nil {
-		log.Printf("Database error checking course ownership: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+	if role == "teacher" {
+		var teacherID int
+		err = db.QueryRow(`
+			SELECT teacher_id FROM teacher 
+			WHERE user_id = ? AND archive_delete_flag = TRUE`, userID).Scan(&teacherID)
+		if err != nil {
+			log.Printf("Error querying teacher: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Teacher not found"})
+			return
+		}
+
+		// Check if the teacher is authorized to view this classroom
+		var exists bool
+		err = db.QueryRow(`
+			SELECT EXISTS (
+				SELECT 1 FROM classroom 
+				WHERE course_id = ? AND teacher_id = ? AND archive_delete_flag = TRUE
+			)`, courseID, teacherID).Scan(&exists)
+		if err != nil {
+			log.Printf("Error checking classroom authorization: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+			return
+		}
+		if !exists {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Unauthorized to view this classroom"})
+			return
+		}
+	} else if role == "student" {
+		var studentID int
+		err = db.QueryRow(`
+			SELECT student_id FROM student 
+			WHERE user_id = ? AND archive_delete_flag = TRUE`, userID).Scan(&studentID)
+		if err != nil {
+			log.Printf("Error querying student: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Student not found"})
+			return
+		}
+
+		// Check if the student is enrolled in this classroom
+		var exists bool
+		err = db.QueryRow(`
+			SELECT EXISTS (
+				SELECT 1 FROM enrollment 
+				WHERE student_id = ? AND course_id = ? AND archive_delete_flag = TRUE
+			)`, studentID, courseID).Scan(&exists)
+		if err != nil {
+			log.Printf("Error checking enrollment: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+			return
+		}
+		if !exists {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Not enrolled in this classroom"})
+			return
+		}
+	} else {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Unauthorized role"})
 		return
 	}
-	if !exists {
-		log.Printf("Course %d not found or not owned by teacher %d", courseID, teacherID)
-		c.JSON(http.StatusNotFound, gin.H{"error": "Course not found or access denied"})
-		return
-	}
 
-	rows, err := db.Query(
-		`SELECT material_id, course_id, title, type, file_path, uploaded_at, description
-		FROM material
-		WHERE course_id = ?
-		ORDER BY uploaded_at DESC`,
-		courseID,
-	)
+	rows, err := db.Query(`
+		SELECT material_id, course_id, title, type, file_path, uploaded_at, description
+		FROM material 
+		WHERE course_id = ? AND archive_delete_flag = TRUE`, courseID)
 	if err != nil {
 		log.Printf("Error querying materials: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error retrieving materials"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
 		return
 	}
 	defer rows.Close()
 
-	var materials []MaterialResponse
+	var materials []models.Material
 	for rows.Next() {
-		var material MaterialResponse
-		err := rows.Scan(
-			&material.MaterialID, &material.CourseID, &material.Title,
-			&material.Type, &material.FilePath, &material.UploadedAt, &material.Description,
-		)
-		if err != nil {
-			log.Printf("Error scanning material row: %v", err)
+		var m models.Material
+		if err := rows.Scan(&m.MaterialID, &m.CourseID, &m.Title, &m.Type, &m.FilePath, &m.UploadedAt, &m.Description); err != nil {
+			log.Printf("Error scanning material: %v", err)
 			continue
 		}
-		log.Printf("Found material: %+v", material)
-		materials = append(materials, material)
-	}
-
-	if len(materials) == 0 {
-		log.Printf("No materials found for course %d with teacher %d", courseID, teacherID)
+		materials = append(materials, m)
 	}
 
 	c.JSON(http.StatusOK, materials)
-}
-
-// GetMaterialHandler retrieves details of a specific material
-func GetMaterialHandler(c *gin.Context) {
-	teacherID := c.MustGet("userID").(int)
-	role := c.MustGet("role").(string)
-
-	if role != "teacher" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Access denied: Only teachers can view material details"})
-		return
-	}
-
-	db := c.MustGet("db").(*sql.DB)
-
-	materialID, err := strconv.Atoi(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid material ID"})
-		return
-	}
-
-	log.Printf("Logged in teacher ID: %d", teacherID)
-	log.Printf("Checking material %d for teacher %d", materialID, teacherID)
-
-	// Verify teacher ownership via course
-	var material MaterialResponse
-	err = db.QueryRow(
-		`SELECT m.material_id, m.course_id, m.title, m.type, m.file_path, m.uploaded_at, m.description
-		FROM material m
-		JOIN classroom c ON m.course_id = c.course_id
-		JOIN teacher t ON c.teacher_id = t.teacher_id
-		WHERE m.material_id = ? AND t.user_id = ?`,
-		materialID, teacherID,
-	).Scan(
-		&material.MaterialID, &material.CourseID, &material.Title,
-		&material.Type, &material.FilePath, &material.UploadedAt, &material.Description,
-	)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			log.Printf("Material %d not found or not owned by teacher %d", materialID, teacherID)
-			c.JSON(http.StatusNotFound, gin.H{"error": "Material not found or access denied"})
-		} else {
-			log.Printf("Error querying material: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error retrieving material"})
-		}
-		return
-	}
-
-	log.Printf("Found material: %+v", material)
-	c.JSON(http.StatusOK, material)
-}
-
-// UpdateMaterialHandler updates details of a specific material
-func UpdateMaterialHandler(c *gin.Context) {
-	teacherID := c.MustGet("userID").(int)
-	role := c.MustGet("role").(string)
-
-	if role != "teacher" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Access denied: Only teachers can update materials"})
-		return
-	}
-
-	db := c.MustGet("db").(*sql.DB)
-
-	materialID, err := strconv.Atoi(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid material ID"})
-		return
-	}
-
-	var updateReq UpdateMaterialRequest
-	if err := c.ShouldBindJSON(&updateReq); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body: " + err.Error()})
-		return
-	}
-
-	// Verify teacher ownership
-	var exists bool
-	err = db.QueryRow(
-		`SELECT EXISTS(
-			SELECT 1 FROM material m
-			JOIN classroom c ON m.course_id = c.course_id
-			JOIN teacher t ON c.teacher_id = t.teacher_id
-			WHERE m.material_id = ? AND t.user_id = ?
-		)`, materialID, teacherID).Scan(&exists)
-	if err != nil {
-		log.Printf("Database error checking material ownership: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
-		return
-	}
-	if !exists {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Material not found or access denied"})
-		return
-	}
-
-	// Update material
-	setClause := "SET "
-	values := []interface{}{}
-	if updateReq.Title != "" {
-		setClause += "title = ?, "
-		values = append(values, updateReq.Title)
-	}
-	if updateReq.Type != "" {
-		setClause += "type = ?, "
-		values = append(values, updateReq.Type)
-	}
-	if updateReq.FilePath != "" {
-		if _, err := url.ParseRequestURI(updateReq.FilePath); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "File path must be a valid URL"})
-			return
-		}
-		setClause += "file_path = ?, "
-		values = append(values, updateReq.FilePath)
-	}
-	if updateReq.Description != "" {
-		setClause += "description = ?, "
-		values = append(values, updateReq.Description)
-	}
-	if len(values) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "No fields to update"})
-		return
-	}
-	setClause = setClause[:len(setClause)-2] // Remove trailing comma and space
-	values = append(values, materialID)
-
-	_, err = db.Exec(
-		"UPDATE material "+setClause+" WHERE material_id = ?", values...,
-	)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error updating material"})
-		log.Printf("Error updating material: %v", err)
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"message": "Material updated successfully"})
-}
-
-// DeleteMaterialHandler deletes a specific material
-func DeleteMaterialHandler(c *gin.Context) {
-	teacherID := c.MustGet("userID").(int)
-	role := c.MustGet("role").(string)
-
-	if role != "teacher" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Access denied: Only teachers can delete materials"})
-		return
-	}
-
-	db := c.MustGet("db").(*sql.DB)
-
-	materialID, err := strconv.Atoi(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid material ID"})
-		return
-	}
-
-	// Verify teacher ownership
-	var exists bool
-	err = db.QueryRow(
-		`SELECT EXISTS(
-			SELECT 1 FROM material m
-			JOIN classroom c ON m.course_id = c.course_id
-			JOIN teacher t ON c.teacher_id = t.teacher_id
-			WHERE m.material_id = ? AND t.user_id = ?
-		)`, materialID, teacherID).Scan(&exists)
-	if err != nil {
-		log.Printf("Database error checking material ownership: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
-		return
-	}
-	if !exists {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Material not found or access denied"})
-		return
-	}
-
-	// Delete material
-	_, err = db.Exec("DELETE FROM material WHERE material_id = ?", materialID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error deleting material"})
-		log.Printf("Error deleting material: %v", err)
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"message": "Material deleted successfully"})
 }

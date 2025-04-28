@@ -5,410 +5,436 @@ import (
 	"log"
 	"net/http"
 	"strconv"
-	"time"
 
 	"github.com/gin-gonic/gin"
+
+	"edusync/models"
 )
-
-// SubmissionResponse represents the response structure for submission operations
-type SubmissionResponse struct {
-	SubmissionID int           `json:"submission_id"`
-	AssignmentID int           `json:"assignment_id"`
-	StudentID    int           `json:"student_id"`
-	StudentName  string        `json:"student_name"`
-	Link         string        `json:"link"`
-	SubmittedAt  time.Time     `json:"submitted_at"`
-	Score        sql.NullInt64 `json:"score"`
-	Feedback     sql.NullString `json:"feedback"`
-	Status       string        `json:"status"`
-	IsLate       bool          `json:"is_late,omitempty"`
-}
-
-// GradeRequest represents the request body for grading a submission
-type GradeRequest struct {
-	Score    int    `json:"score"`
-	Feedback string `json:"feedback"`
-}
-
-// BulkGradeRequest represents the request for grading multiple submissions
-type BulkGradeRequest struct {
-	SubmissionIDs []int  `json:"submission_ids"`
-	Score         int    `json:"score"`
-	Feedback      string `json:"feedback"`
-}
 
 // CreateSubmissionHandler creates a new submission
 func CreateSubmissionHandler(c *gin.Context) {
-	// Get user ID and role from context
-	userID := c.MustGet("userID").(int)
-	role := c.MustGet("role").(string)
-
-	// Check if user has student role
-	if role != "student" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Access denied: Only students can submit assignments"})
+	userID, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found in context"})
+		return
+	}
+	role, exists := c.Get("role")
+	if !exists || role != "student" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Only students can submit assignments"})
 		return
 	}
 
-	// Get database connection
+	var req models.Submission
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body: " + err.Error()})
+		return
+	}
+
 	db := c.MustGet("db").(*sql.DB)
-
-	// Parse request body
-	var submissionReq struct {
-		AssignmentID int    `json:"assignment_id" binding:"required"`
-		Link         string `json:"link" binding:"required,url"`
-	}
-	if err := c.ShouldBindJSON(&submissionReq); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
-		return
-	}
-
-	// Get student ID
 	var studentID int
-	err := db.QueryRow("SELECT student_id FROM student WHERE user_id = ?", userID).Scan(&studentID)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Student not found"})
-		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
-			log.Printf("Error retrieving student ID: %v", err)
-		}
+	err := db.QueryRow(`
+		SELECT student_id FROM student 
+		WHERE user_id = ? AND archive_delete_flag = TRUE`, userID).Scan(&studentID)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Student not found"})
+		return
+	} else if err != nil {
+		log.Printf("Error querying student: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
 		return
 	}
 
-	// Insert new submission
-	result, err := db.Exec(
-		`INSERT INTO submission (assignment_id, student_id, link, submitted_at, status)
-		VALUES (?, ?, ?, NOW(), 'submitted')`,
-		submissionReq.AssignmentID, studentID, submissionReq.Link,
-	)
+	// Check if the assignment exists
+	var assignmentExists bool
+	err = db.QueryRow(`
+		SELECT EXISTS (
+			SELECT 1 FROM assignment 
+			WHERE assignment_id = ? AND archive_delete_flag = TRUE
+		)`, req.AssignmentID).Scan(&assignmentExists)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error creating submission"})
+		log.Printf("Error checking assignment existence: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		return
+	}
+	if !assignmentExists {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Assignment not found"})
+		return
+	}
+
+	// Check if the student is enrolled in the course
+	var courseID int
+	err = db.QueryRow(`
+		SELECT course_id FROM assignment 
+		WHERE assignment_id = ? AND archive_delete_flag = TRUE`, req.AssignmentID).Scan(&courseID)
+	if err != nil {
+		log.Printf("Error querying course ID: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		return
+	}
+
+	var enrolled bool
+	err = db.QueryRow(`
+		SELECT EXISTS (
+			SELECT 1 FROM enrollment 
+			WHERE student_id = ? AND course_id = ? AND archive_delete_flag = TRUE
+		)`, studentID, courseID).Scan(&enrolled)
+	if err != nil {
+		log.Printf("Error checking enrollment: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		return
+	}
+	if !enrolled {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Student not enrolled in the course"})
+		return
+	}
+
+	result, err := db.Exec(`
+		INSERT INTO submission (assignment_id, student_id, content, submitted_at, status, archive_delete_flag)
+		VALUES (?, ?, ?, NOW(), 'submitted', TRUE)`,
+		req.AssignmentID, studentID, req.Content)
+	if err != nil {
 		log.Printf("Error inserting submission: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create submission"})
 		return
 	}
 
 	submissionID, err := result.LastInsertId()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error retrieving submission ID"})
-		log.Printf("Error getting last insert ID: %v", err)
+		log.Printf("Error retrieving submission ID: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve submission ID"})
 		return
 	}
 
-	c.JSON(http.StatusCreated, gin.H{"submission_id": submissionID, "message": "Submission created successfully"})
+	c.JSON(http.StatusOK, gin.H{
+		"submission_id": submissionID,
+		"assignment_id": req.AssignmentID,
+		"student_id":    studentID,
+		"status":        "submitted",
+	})
 }
 
-// GetAssignmentSubmissionsHandler retrieves all submissions for a specific assignment
-func GetAssignmentSubmissionsHandler(c *gin.Context) {
-	teacherID := c.MustGet("userID").(int)
-	role := c.MustGet("role").(string)
+// UpdateSubmissionHandler updates a submission
+func UpdateSubmissionHandler(c *gin.Context) {
+	userID, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found in context"})
+		return
+	}
+	role, exists := c.Get("role")
+	if !exists || role != "student" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Only students can update submissions"})
+		return
+	}
 
-	if role != "teacher" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Access denied: Only teachers can view submissions"})
+	submissionID, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid submission ID"})
+		return
+	}
+
+	var req models.Submission
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body: " + err.Error()})
 		return
 	}
 
 	db := c.MustGet("db").(*sql.DB)
+	var studentID int
+	err = db.QueryRow(`
+		SELECT student_id FROM student 
+		WHERE user_id = ? AND archive_delete_flag = TRUE`, userID).Scan(&studentID)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Student not found"})
+		return
+	} else if err != nil {
+		log.Printf("Error querying student: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		return
+	}
 
-	assignmentID, err := strconv.Atoi(c.Param("id"))
+	// Check if the submission exists and belongs to the student
+	var submissionExists bool
+	err = db.QueryRow(`
+		SELECT EXISTS (
+			SELECT 1 FROM submission 
+			WHERE submission_id = ? AND student_id = ? AND archive_delete_flag = TRUE
+		)`, submissionID, studentID).Scan(&submissionExists)
+	if err != nil {
+		log.Printf("Error checking submission existence: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		return
+	}
+	if !submissionExists {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Submission not found or unauthorized"})
+		return
+	}
+
+	_, err = db.Exec(`
+		UPDATE submission 
+		SET content = ?, submitted_at = NOW(), status = ?
+		WHERE submission_id = ? AND student_id = ? AND archive_delete_flag = TRUE`,
+		req.Content, req.Status, submissionID, studentID)
+	if err != nil {
+		log.Printf("Error updating submission: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update submission"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"submission_id": submissionID,
+		"content":       req.Content,
+		"status":        req.Status,
+	})
+}
+
+// GradeSubmissionHandler grades a submission
+func GradeSubmissionHandler(c *gin.Context) {
+	userID, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found in context"})
+		return
+	}
+	role, exists := c.Get("role")
+	if !exists || role != "teacher" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Only teachers can grade submissions"})
+		return
+	}
+
+	userIDInt, ok := userID.(int)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid user ID type"})
+		return
+	}
+
+	submissionID, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid submission ID"})
+		return
+	}
+
+	// Check if the submission exists
+	db := c.MustGet("db").(*sql.DB)
+	var submissionExists bool
+	err = db.QueryRow(`
+		SELECT EXISTS (
+			SELECT 1 FROM submission 
+			WHERE submission_id = ? AND archive_delete_flag = TRUE
+		)`, submissionID).Scan(&submissionExists)
+	if err != nil {
+		log.Printf("Error checking submission existence: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		return
+	}
+	if !submissionExists {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Submission not found"})
+		return
+	}
+
+	// Check if the teacher is authorized to grade this submission
+	var teacherID int
+	err = db.QueryRow(`
+		SELECT t.teacher_id
+		FROM submission s
+		JOIN assignment a ON s.assignment_id = a.assignment_id
+		JOIN classroom c ON a.course_id = c.course_id
+		JOIN teacher t ON c.teacher_id = t.teacher_id
+		WHERE s.submission_id = ? AND s.archive_delete_flag = TRUE
+		AND a.archive_delete_flag = TRUE AND c.archive_delete_flag = TRUE
+		AND t.archive_delete_flag = TRUE AND t.user_id = ?`, submissionID, userIDInt).Scan(&teacherID)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Unauthorized to grade this submission"})
+		return
+	} else if err != nil {
+		log.Printf("Error querying teacher authorization: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		return
+	}
+
+	var req struct {
+		Score    int    `json:"score"`
+		Feedback string `json:"feedback"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body: " + err.Error()})
+		return
+	}
+
+	_, err = db.Exec(`
+		UPDATE submission 
+		SET score = ?, feedback = ?, status = 'graded'
+		WHERE submission_id = ? AND archive_delete_flag = TRUE`,
+		req.Score, req.Feedback, submissionID)
+	if err != nil {
+		log.Printf("Error grading submission: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to grade submission"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"submission_id": submissionID,
+		"score":         req.Score,
+		"feedback":      req.Feedback,
+		"status":        "graded",
+	})
+}
+
+// GetSubmissionsByAssignmentHandler lists submissions for an assignment
+func GetSubmissionsByAssignmentHandler(c *gin.Context) {
+	userID, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found in context"})
+		return
+	}
+	role, exists := c.Get("role")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Role not found in context"})
+		return
+	}
+
+	assignmentID, err := strconv.Atoi(c.Param("assignment_id"))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid assignment ID"})
 		return
 	}
 
-	log.Printf("Logged in teacher ID: %d", teacherID)
-	log.Printf("Checking assignment %d for teacher %d", assignmentID, teacherID)
-	var exists bool
-	err = db.QueryRow(
-		`SELECT EXISTS(
-			SELECT 1 FROM assignment a
-			JOIN classroom c ON a.course_id = c.course_id
-			JOIN teacher t ON c.teacher_id = t.teacher_id
-			WHERE a.assignment_id = ? AND t.user_id = ?
-		)`, assignmentID, teacherID).Scan(&exists)
+	// Check if the assignment exists
+	db := c.MustGet("db").(*sql.DB)
+	var assignmentExists bool
+	err = db.QueryRow(`
+		SELECT EXISTS (
+			SELECT 1 FROM assignment 
+			WHERE assignment_id = ? AND archive_delete_flag = TRUE
+		)`, assignmentID).Scan(&assignmentExists)
 	if err != nil {
-		log.Printf("Database error checking assignment ownership: %v", err)
+		log.Printf("Error checking assignment existence: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
 		return
 	}
-	if !exists {
-		log.Printf("Assignment %d not found or not owned by teacher %d", assignmentID, teacherID)
-		c.JSON(http.StatusNotFound, gin.H{"error": "Assignment not found or access denied"})
+	if !assignmentExists {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Assignment not found"})
 		return
 	}
 
-	rows, err := db.Query(
-		`SELECT s.submission_id, s.assignment_id, s.student_id, u.name, s.link,
-		s.submitted_at, s.score, s.feedback, s.status
-		FROM submission s
-		JOIN student st ON s.student_id = st.student_id
-		JOIN user u ON st.user_id = u.user_id
-		WHERE s.assignment_id = ? AND s.status != 'deleted'
-		ORDER BY s.submitted_at DESC`,
-		assignmentID,
-	)
+	var query string
+	var args []interface{}
+
+	if role == "teacher" {
+		userIDInt, ok := userID.(int)
+		if !ok {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid user ID type"})
+			return
+		}
+
+		// Check if the teacher is authorized to view submissions for this assignment
+		var teacherID int
+		err = db.QueryRow(`
+			SELECT t.teacher_id
+			FROM assignment a
+			JOIN classroom c ON a.course_id = c.course_id
+			JOIN teacher t ON c.teacher_id = t.teacher_id
+			WHERE a.assignment_id = ? AND a.archive_delete_flag = TRUE
+			AND c.archive_delete_flag = TRUE AND t.archive_delete_flag = TRUE
+			AND t.user_id = ?`, assignmentID, userIDInt).Scan(&teacherID)
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Unauthorized to view submissions for this assignment"})
+			return
+		} else if err != nil {
+			log.Printf("Error checking teacher authorization: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+			return
+		}
+
+		query = `
+			SELECT s.submission_id, s.assignment_id, s.student_id, s.content, s.submitted_at, s.score, s.feedback, s.status
+			FROM submission s
+			JOIN student st ON s.student_id = st.student_id
+			JOIN enrollment e ON st.student_id = e.student_id
+			JOIN classroom c ON e.course_id = c.course_id
+			JOIN teacher t ON c.teacher_id = t.teacher_id
+			WHERE s.assignment_id = ? AND s.archive_delete_flag = TRUE AND st.archive_delete_flag = TRUE
+			AND e.archive_delete_flag = TRUE AND c.archive_delete_flag = TRUE AND t.archive_delete_flag = TRUE
+			AND t.user_id = ?`
+		args = []interface{}{assignmentID, userIDInt}
+	} else if role == "student" {
+		userIDInt, ok := userID.(int)
+		if !ok {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid user ID type"})
+			return
+		}
+
+		var studentID int
+		err := db.QueryRow(`
+			SELECT student_id FROM student 
+			WHERE user_id = ? AND archive_delete_flag = TRUE`, userIDInt).Scan(&studentID)
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Student not found"})
+			return
+		} else if err != nil {
+			log.Printf("Error querying student: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+			return
+		}
+
+		// Check if the student is enrolled in the course
+		var courseID int
+		err = db.QueryRow(`
+			SELECT course_id FROM assignment 
+			WHERE assignment_id = ? AND archive_delete_flag = TRUE`, assignmentID).Scan(&courseID)
+		if err != nil {
+			log.Printf("Error querying course ID: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+			return
+		}
+
+		var enrolled bool
+		err = db.QueryRow(`
+			SELECT EXISTS (
+				SELECT 1 FROM enrollment 
+				WHERE student_id = ? AND course_id = ? AND archive_delete_flag = TRUE
+			)`, studentID, courseID).Scan(&enrolled)
+		if err != nil {
+			log.Printf("Error checking enrollment: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+			return
+		}
+		if !enrolled {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Student not enrolled in the course"})
+			return
+		}
+
+		query = `
+			SELECT submission_id, assignment_id, student_id, content, submitted_at, score, feedback, status
+			FROM submission 
+			WHERE assignment_id = ? AND student_id = ? AND archive_delete_flag = TRUE`
+		args = []interface{}{assignmentID, studentID}
+	} else {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Unauthorized role"})
+		return
+	}
+
+	rows, err := db.Query(query, args...)
 	if err != nil {
 		log.Printf("Error querying submissions: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error retrieving submissions"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
 		return
 	}
 	defer rows.Close()
 
-	var submissions []SubmissionResponse
-	var dueDate time.Time
-	err = db.QueryRow("SELECT due_date FROM assignment WHERE assignment_id = ?", assignmentID).Scan(&dueDate)
-	if err == nil {
-		for rows.Next() {
-			var submission SubmissionResponse
-			err := rows.Scan(
-				&submission.SubmissionID, &submission.AssignmentID, &submission.StudentID,
-				&submission.StudentName, &submission.Link, &submission.SubmittedAt,
-				&submission.Score, &submission.Feedback, &submission.Status,
-			)
-			if err != nil {
-				log.Printf("Error scanning submission row: %v", err)
-				continue
-			}
-			submission.IsLate = submission.SubmittedAt.After(dueDate)
-			log.Printf("Found submission: %+v", submission)
-			submissions = append(submissions, submission)
+	var submissions []models.Submission
+	for rows.Next() {
+		var s models.Submission
+		if err := rows.Scan(&s.SubmissionID, &s.AssignmentID, &s.StudentID, &s.Content, &s.SubmittedAt, &s.Score, &s.Feedback, &s.Status); err != nil {
+			log.Printf("Error scanning submission: %v", err)
+			continue
 		}
-	} else {
-		for rows.Next() {
-			var submission SubmissionResponse
-			err := rows.Scan(
-				&submission.SubmissionID, &submission.AssignmentID, &submission.StudentID,
-				&submission.StudentName, &submission.Link, &submission.SubmittedAt,
-				&submission.Score, &submission.Feedback, &submission.Status,
-			)
-			if err != nil {
-				log.Printf("Error scanning submission row: %v", err)
-				continue
-			}
-			log.Printf("Found submission (no due date): %+v", submission)
-			submissions = append(submissions, submission)
-		}
+		submissions = append(submissions, s)
 	}
 
-	if len(submissions) == 0 {
-		log.Printf("No submissions found for assignment %d with teacher %d", assignmentID, teacherID)
+	if err = rows.Err(); err != nil {
+		log.Printf("Error iterating submissions: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		return
 	}
 
 	c.JSON(http.StatusOK, submissions)
-}
-
-// GradeSubmissionHandler grades a specific submission
-func GradeSubmissionHandler(c *gin.Context) {
-	teacherID := c.MustGet("userID").(int)
-	role := c.MustGet("role").(string)
-
-	if role != "teacher" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Access denied: Only teachers can grade submissions"})
-		return
-	}
-
-	db := c.MustGet("db").(*sql.DB)
-
-	submissionID, err := strconv.Atoi(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid submission ID"})
-		return
-	}
-
-	var gradeReq GradeRequest
-	if err := c.ShouldBindJSON(&gradeReq); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
-		return
-	}
-
-	// Verify teacher ownership (via assignment)
-	var exists bool
-	err = db.QueryRow(
-		`SELECT EXISTS(
-			SELECT 1 FROM submission s
-			JOIN assignment a ON s.assignment_id = a.assignment_id
-			JOIN classroom c ON a.course_id = c.course_id
-			JOIN teacher t ON c.teacher_id = t.teacher_id
-			WHERE s.submission_id = ? AND t.user_id = ?
-		)`, submissionID, teacherID).Scan(&exists)
-	if err != nil {
-		log.Printf("Database error checking submission ownership: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
-		return
-	}
-	if !exists {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Submission not found or access denied"})
-		return
-	}
-
-	// Update submission with grade
-	_, err = db.Exec(
-		`UPDATE submission SET score = ?, feedback = ?, status = 'graded'
-		WHERE submission_id = ?`,
-		gradeReq.Score, gradeReq.Feedback, submissionID,
-	)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error grading submission"})
-		log.Printf("Error updating submission: %v", err)
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"message": "Submission graded successfully"})
-}
-
-// BulkGradeSubmissionsHandler grades multiple submissions for an assignment
-func BulkGradeSubmissionsHandler(c *gin.Context) {
-	teacherID := c.MustGet("userID").(int)
-	role := c.MustGet("role").(string)
-
-	if role != "teacher" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Access denied: Only teachers can bulk grade submissions"})
-		return
-	}
-
-	db := c.MustGet("db").(*sql.DB)
-
-	assignmentID, err := strconv.Atoi(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid assignment ID"})
-		return
-	}
-
-	var bulkGradeReq BulkGradeRequest
-	if err := c.ShouldBindJSON(&bulkGradeReq); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
-		return
-	}
-
-	// Verify teacher ownership
-	var exists bool
-	err = db.QueryRow(
-		`SELECT EXISTS(
-			SELECT 1 FROM assignment a
-			JOIN classroom c ON a.course_id = c.course_id
-			JOIN teacher t ON c.teacher_id = t.teacher_id
-			WHERE a.assignment_id = ? AND t.user_id = ?
-		)`, assignmentID, teacherID).Scan(&exists)
-	if err != nil {
-		log.Printf("Database error checking assignment ownership: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
-		return
-	}
-	if !exists {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Assignment not found or access denied"})
-		return
-	}
-
-	// Bulk update submissions
-	tx, err := db.Begin()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start transaction"})
-		return
-	}
-
-	stmt, err := tx.Prepare(
-		`UPDATE submission SET score = ?, feedback = ?, status = 'graded'
-		WHERE submission_id = ? AND assignment_id = ? AND status != 'deleted'`,
-	)
-	if err != nil {
-		tx.Rollback()
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to prepare statement"})
-		return
-	}
-	defer stmt.Close()
-
-	for _, submissionID := range bulkGradeReq.SubmissionIDs {
-		_, err := stmt.Exec(bulkGradeReq.Score, bulkGradeReq.Feedback, submissionID, assignmentID)
-		if err != nil {
-			tx.Rollback()
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error grading submission"})
-			log.Printf("Error updating submission %d: %v", submissionID, err)
-			return
-		}
-	}
-
-	err = tx.Commit()
-	if err != nil {
-		tx.Rollback()
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit transaction"})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"message": "Bulk grading completed successfully"})
-}
-
-// GetSubmissionHandler retrieves details of a specific submission
-func GetSubmissionHandler(c *gin.Context) {
-	teacherID := c.MustGet("userID").(int)
-	role := c.MustGet("role").(string)
-
-	if role != "teacher" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Access denied: Only teachers can view submission details"})
-		return
-	}
-
-	db := c.MustGet("db").(*sql.DB)
-
-	submissionID, err := strconv.Atoi(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid submission ID"})
-		return
-	}
-
-	log.Printf("Logged in teacher ID: %d", teacherID)
-	log.Printf("Checking submission %d for teacher %d", submissionID, teacherID)
-
-	// Verify teacher ownership (via assignment)
-	var exists bool
-	err = db.QueryRow(
-		`SELECT EXISTS(
-			SELECT 1 FROM submission s
-			JOIN assignment a ON s.assignment_id = a.assignment_id
-			JOIN classroom c ON a.course_id = c.course_id
-			JOIN teacher t ON c.teacher_id = t.teacher_id
-			WHERE s.submission_id = ? AND t.user_id = ?
-		)`, submissionID, teacherID).Scan(&exists)
-	if err != nil {
-		log.Printf("Database error checking submission ownership: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
-		return
-	}
-	if !exists {
-		log.Printf("Submission %d not found or not owned by teacher %d", submissionID, teacherID)
-		c.JSON(http.StatusNotFound, gin.H{"error": "Submission not found or access denied"})
-		return
-	}
-
-	var submission SubmissionResponse
-	err = db.QueryRow(
-		`SELECT s.submission_id, s.assignment_id, s.student_id, u.name, s.link,
-		s.submitted_at, s.score, s.feedback, s.status
-		FROM submission s
-		JOIN student st ON s.student_id = st.student_id
-		JOIN user u ON st.user_id = u.user_id
-		WHERE s.submission_id = ? AND s.status != 'deleted'`,
-		submissionID,
-	).Scan(
-		&submission.SubmissionID, &submission.AssignmentID, &submission.StudentID,
-		&submission.StudentName, &submission.Link, &submission.SubmittedAt,
-		&submission.Score, &submission.Feedback, &submission.Status,
-	)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			log.Printf("Submission %d not found", submissionID)
-			c.JSON(http.StatusNotFound, gin.H{"error": "Submission not found"})
-		} else {
-			log.Printf("Error querying submission: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error retrieving submission"})
-		}
-		return
-	}
-
-	var dueDate time.Time
-	err = db.QueryRow("SELECT due_date FROM assignment WHERE assignment_id = ?", submission.AssignmentID).Scan(&dueDate)
-	if err == nil {
-		submission.IsLate = submission.SubmittedAt.After(dueDate)
-	}
-
-	log.Printf("Found submission: %+v", submission)
-	c.JSON(http.StatusOK, submission)
 }

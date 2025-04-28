@@ -1,0 +1,641 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Edusync Test Frontend</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    const API_BASE_URL = 'http://localhost:8080/api';
+
+    // Utility functions
+    function getToken() {
+      return localStorage.getItem('token');
+    }
+
+    function setToken(token) {
+      localStorage.setItem('token', token);
+    }
+
+    function clearToken() {
+      localStorage.removeItem('token');
+    }
+
+    async function apiFetch(endpoint, method, data = null) {
+      const headers = {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${getToken()}`
+      };
+      const options = { method, headers };
+      if (data) options.body = JSON.stringify(data);
+      const response = await fetch(`${API_BASE_URL}${endpoint}`, options);
+      
+      // Read the response body once as text
+      const bodyText = await response.text();
+      
+      if (!response.ok) {
+        let errorMessage = 'Request failed';
+        try {
+          // Attempt to parse the body as JSON
+          const errorData = JSON.parse(bodyText);
+          errorMessage = errorData.error?.message || errorData.message || errorMessage;
+        } catch {
+          // If JSON parsing fails, use the raw text as the error message
+          errorMessage = bodyText || errorMessage;
+        }
+        throw new Error(errorMessage);
+      }
+      
+      // Parse the body as JSON for successful responses
+      try {
+        return JSON.parse(bodyText);
+      } catch {
+        throw new Error('Failed to parse response as JSON');
+      }
+    }
+
+    // Register
+    async function handleRegister() {
+      const role = document.getElementById('regRole').value;
+      const enrollmentYearInput = document.getElementById('regYear').value.trim();
+      const data = {
+        name: document.getElementById('regName').value.trim(),
+        email: document.getElementById('regEmail').value.trim(),
+        password: document.getElementById('regPassword').value,
+        role: role,
+        contact_number: document.getElementById('regContact').value.trim() || null,
+        profile_picture: null, // Not in the form, set to null
+        org: document.getElementById('regOrg').value.trim() || null,
+        grade_level: role === 'student' ? (document.getElementById('regGrade').value.trim() || null) : null,
+        enrollment_year: role === 'student' ? (enrollmentYearInput ? parseInt(enrollmentYearInput) : null) : null,
+        dept: role === 'teacher' ? (document.getElementById('regDept').value.trim() || null) : null
+      };
+
+      // Validate required fields
+      if (!data.name || !data.email || !data.password) {
+        alert('Name, email, and password are required');
+        return;
+      }
+
+      // Validate email format
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(data.email)) {
+        alert('Please enter a valid email address (e.g., user@example.com)');
+        return;
+      }
+
+      // Validate password complexity (minimum 8 characters, at least one letter and one number)
+      const passwordRegex = /^(?=.*[A-Za-z])(?=.*\d)[A-Za-z\d]{8,}$/;
+      if (!passwordRegex.test(data.password)) {
+        alert('Password must be at least 8 characters long and contain at least one letter and one number');
+        return;
+      }
+
+      // Validate enrollment_year if provided (must be a valid integer)
+      if (role === 'student' && enrollmentYearInput && (isNaN(data.enrollment_year) || data.enrollment_year <= 0)) {
+        alert('Enrollment year must be a valid positive integer (e.g., 2023)');
+        return;
+      }
+
+      try {
+        const result = await apiFetch('/register', 'POST', data);
+        alert('Registration successful: ' + result.message);
+        document.getElementById('registerForm').reset();
+      } catch (error) {
+        alert('Registration failed: ' + error.message);
+      }
+    }
+
+    // Login
+    async function handleLogin() {
+      const data = {
+        email: document.getElementById('loginEmail').value.trim(),
+        password: document.getElementById('loginPassword').value
+      };
+      if (!data.email || !data.password) {
+        alert('Email and password are required');
+        return;
+      }
+      try {
+        const result = await apiFetch('/login', 'POST', data);
+        setToken(result.token);
+        alert('Login successful');
+        document.getElementById('loginForm').reset();
+        updateUI();
+      } catch (error) {
+        alert('Login failed: ' + error.message);
+      }
+    }
+
+    // Logout
+    function handleLogout() {
+      clearToken();
+      updateUI();
+      alert('Logged out');
+    }
+
+    // Profile
+    async function fetchProfile() {
+      try {
+        const profile = await apiFetch('/profile', 'GET');
+        document.getElementById('profileData').innerText = JSON.stringify(profile, null, 2);
+      } catch (error) {
+        alert('Profile fetch failed: ' + error.message);
+      }
+    }
+
+    // Teacher Dashboard
+    async function fetchTeacherDashboard() {
+      try {
+        const dashboard = await apiFetch('/teacher/dashboard', 'GET');
+        document.getElementById('dashboardData').innerText = JSON.stringify(dashboard, null, 2);
+      } catch (error) {
+        alert('Dashboard fetch failed: ' + error.message);
+      }
+    }
+
+    // Teacher Stats
+    async function fetchTeacherStats() {
+      try {
+        const stats = await apiFetch('/teacher/stats', 'GET');
+        document.getElementById('statsData').innerText = JSON.stringify(stats, null, 2);
+      } catch (error) {
+        alert('Stats fetch failed: ' + error.message);
+      }
+    }
+
+    // Classrooms
+    async function fetchClassrooms() {
+      try {
+        const classrooms = await apiFetch('/teacher/classrooms', 'GET');
+        document.getElementById('classroomsData').innerText = JSON.stringify(classrooms, null, 2);
+      } catch (error) {
+        alert('Classrooms fetch failed: ' + error.message);
+      }
+    }
+
+    async function createClassroom() {
+      const data = {
+        title: document.getElementById('classTitle').value.trim(),
+        description: document.getElementById('classDesc').value.trim() || null,
+        start_date: document.getElementById('classStart').value || null,
+        end_date: document.getElementById('classEnd').value || null,
+        subject_area: document.getElementById('classSubject').value.trim() || null
+      };
+      if (!data.title) {
+        alert('Title is required');
+        return;
+      }
+      if (data.start_date && !/^\d{4}-\d{2}-\d{2}$/.test(data.start_date)) {
+        alert('Start date must be in YYYY-MM-DD format');
+        return;
+      }
+      if (data.end_date && !/^\d{4}-\d{2}-\d{2}$/.test(data.end_date)) {
+        alert('End date must be in YYYY-MM-DD format');
+        return;
+      }
+      if (data.start_date && data.end_date && new Date(data.end_date) < new Date(data.start_date)) {
+        alert('End date must be after start date');
+        return;
+      }
+      console.log('Payload:', data); // Debug
+      try {
+        const result = await apiFetch('/classrooms', 'POST', data);
+        alert('Classroom created: ' + result.message);
+        document.getElementById('classroomForm').reset();
+        fetchClassrooms();
+      } catch (error) {
+        alert('Classroom creation failed: ' + error.message);
+      }
+    }
+
+    async function updateClassroom() {
+      const id = parseInt(document.getElementById('updateClassId').value);
+      const data = {
+        title: document.getElementById('updateClassTitle').value.trim(),
+        description: document.getElementById('updateClassDesc').value.trim() || null,
+        start_date: document.getElementById('updateClassStart').value || null,
+        end_date: document.getElementById('updateClassEnd').value || null,
+        subject_area: document.getElementById('updateClassSubject').value.trim() || null
+      };
+      if (isNaN(id) || id <= 0) {
+        alert('Valid Course ID is required');
+        return;
+      }
+      if (!data.title) {
+        alert('Title is required');
+        return;
+      }
+      if (data.start_date && !/^\d{4}-\d{2}-\d{2}$/.test(data.start_date)) {
+        alert('Start date must be in YYYY-MM-DD format');
+        return;
+      }
+      if (data.end_date && !/^\d{4}-\d{2}-\d{2}$/.test(data.end_date)) {
+        alert('End date must be in YYYY-MM-DD format');
+        return;
+      }
+      if (data.start_date && data.end_date && new Date(data.end_date) < new Date(data.start_date)) {
+        alert('End date must be after start date');
+        return;
+      }
+      try {
+        const result = await apiFetch(`/classrooms/${id}`, 'PUT', data);
+        alert('Classroom updated: ' + result.message);
+        document.getElementById('updateClassroomForm').reset();
+        fetchClassrooms();
+      } catch (error) {
+        alert('Classroom update failed: ' + error.message);
+      }
+    }
+
+    async function deleteClassroom() {
+      const id = parseInt(document.getElementById('deleteClassId').value);
+      if (isNaN(id) || id <= 0) {
+        alert('Valid Course ID is required');
+        return;
+      }
+      try {
+        const result = await apiFetch(`/classrooms/${id}`, 'DELETE');
+        alert('Classroom deleted: ' + result.message);
+        document.getElementById('deleteClassId').value = '';
+        fetchClassrooms();
+      } catch (error) {
+        alert('Classroom deletion failed: ' + error.message);
+      }
+    }
+
+    // Assignments
+    async function createAssignment() {
+      const data = {
+        course_id: parseInt(document.getElementById('assignCourseId').value),
+        title: document.getElementById('assignTitle').value.trim(),
+        description: document.getElementById('assignDesc').value.trim() || null,
+        due_date: document.getElementById('assignDueDate').value || null,
+        max_points: parseInt(document.getElementById('assignMaxPoints').value)
+      };
+      if (isNaN(data.course_id) || !data.title || !data.due_date || isNaN(data.max_points)) {
+        alert('All fields are required');
+        return;
+      }
+      // Validate due_date format (YYYY-MM-DDThh:mm)
+      if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(data.due_date)) {
+        alert('Due date must be in YYYY-MM-DDThh:mm format (e.g., 2025-04-30T14:30)');
+        return;
+      }
+      // Normalize due_date to ISO 8601 format (append :00Z for seconds and UTC timezone)
+      data.due_date = `${data.due_date}:00Z`;
+      console.log('Payload:', data); // Debug
+      try {
+        const result = await apiFetch('/assignments', 'POST', data);
+        alert('Assignment created: ' + result.message);
+        document.getElementById('assignmentForm').reset();
+      } catch (error) {
+        alert('Assignment creation failed: ' + error.message);
+      }
+    }
+
+    async function fetchAssignmentsByClassroom() {
+      const courseId = parseInt(document.getElementById('fetchAssignCourseId').value);
+      if (isNaN(courseId) || courseId <= 0) {
+        alert('Valid Course ID is required');
+        return;
+      }
+      try {
+        const assignments = await apiFetch(`/classrooms/${courseId}/assignments`, 'GET');
+        document.getElementById('assignmentsData').textContent = JSON.stringify(assignments, null, 2);
+      } catch (error) {
+        alert('Assignments fetch failed: ' + error.message);
+      }
+    }
+
+    async function updateAssignment() {
+      const id = parseInt(document.getElementById('updateAssignId').value);
+      const data = {
+        title: document.getElementById('updateAssignTitle').value.trim(),
+        description: document.getElementById('updateAssignDesc').value.trim() || null,
+        due_date: document.getElementById('updateAssignDueDate').value || null,
+        max_points: parseInt(document.getElementById('updateAssignMaxPoints').value)
+      };
+      if (isNaN(id) || id <= 0) {
+        alert('Valid Assignment ID is required');
+        return;
+      }
+      // Validate due_date format if provided (YYYY-MM-DDThh:mm)
+      if (data.due_date && !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(data.due_date)) {
+        alert('Due date must be in YYYY-MM-DDThh:mm format (e.g., 2025-04-30T14:30)');
+        return;
+      }
+      // Normalize due_date to ISO 8601 format (append :00Z for seconds and UTC timezone)
+      if (data.due_date) {
+        data.due_date = `${data.due_date}:00Z`;
+      }
+      try {
+        const result = await apiFetch(`/assignments/${id}`, 'PUT', data);
+        alert('Assignment updated: ' + result.message);
+        document.getElementById('updateAssignmentForm').reset();
+      } catch (error) {
+        alert('Assignment update failed: ' + error.message);
+      }
+    }
+
+    async function deleteAssignment() {
+      const id = parseInt(document.getElementById('deleteAssignId').value);
+      if (isNaN(id) || id <= 0) {
+        alert('Valid Assignment ID is required');
+        return;
+      }
+      try {
+        const result = await apiFetch(`/assignments/${id}`, 'DELETE');
+        alert('Assignment deleted: ' + result.message);
+        document.getElementById('deleteAssignId').value = '';
+      } catch (error) {
+        alert('Assignment deletion failed: ' + error.message);
+      }
+    }
+
+    // Material Management
+    async function createMaterial() {
+      const data = {
+        course_id: parseInt(document.getElementById('matCourseId').value),
+        title: document.getElementById('matTitle').value.trim(),
+        description: document.getElementById('matDesc').value.trim() || null,
+        type: document.getElementById('matType').value,
+        file_path: document.getElementById('matFilePath').value.trim()
+      };
+      if (isNaN(data.course_id) || !data.title || !data.file_path) {
+        alert('Course ID, title, and file path are required');
+        return;
+      }
+      try {
+        const result = await apiFetch('/materials', 'POST', data);
+        alert('Material created: ' + result.message);
+        document.getElementById('materialForm').reset();
+      } catch (error) {
+        alert('Material creation failed: ' + error.message);
+      }
+    }
+
+    async function fetchMaterialsByClassroom() {
+      const courseId = parseInt(document.getElementById('fetchMatCourseId').value);
+      if (isNaN(courseId) || courseId <= 0) {
+        alert('Valid Course ID is required');
+        return;
+      }
+      try {
+        const materials = await apiFetch(`/classrooms/${courseId}/materials`, 'GET');
+        document.getElementById('materialsData').textContent = JSON.stringify(materials, null, 2);
+      } catch (error) {
+        alert('Materials fetch failed: ' + error.message);
+      }
+    }
+
+    async function updateMaterial() {
+      const id = parseInt(document.getElementById('updateMatId').value);
+      const data = {
+        title: document.getElementById('updateMatTitle').value.trim(),
+        description: document.getElementById('updateMatDesc').value.trim() || null,
+        type: document.getElementById('updateMatType').value,
+        file_path: document.getElementById('updateMatFilePath').value.trim()
+      };
+      if (isNaN(id) || id <= 0) {
+        alert('Valid Material ID is required');
+        return;
+      }
+      try {
+        const result = await apiFetch(`/materials/${id}`, 'PUT', data);
+        alert('Material updated: ' + result.message);
+        document.getElementById('updateMaterialForm').reset();
+      } catch (error) {
+        alert('Material update failed: ' + error.message);
+      }
+    }
+
+    async function deleteMaterial() {
+      const id = parseInt(document.getElementById('deleteMatId').value);
+      if (isNaN(id) || id <= 0) {
+        alert('Valid Material ID is required');
+        return;
+      }
+      try {
+        const result = await apiFetch(`/materials/${id}`, 'DELETE');
+        alert('Material deleted: ' + result.message);
+        document.getElementById('deleteMatId').value = '';
+      } catch (error) {
+        alert('Material deletion failed: ' + error.message);
+      }
+    }
+
+    // Submission Management
+    async function fetchSubmissionsByAssignment() {
+      const assignmentId = parseInt(document.getElementById('fetchSubmitAssignId').value);
+      if (isNaN(assignmentId) || assignmentId <= 0) {
+        alert('Valid Assignment ID is required');
+        return;
+      }
+      try {
+        const submissions = await apiFetch(`/assignments/${assignmentId}/submissions`, 'GET');
+        document.getElementById('submissionsData').textContent = JSON.stringify(submissions, null, 2);
+      } catch (error) {
+        alert('Submissions fetch failed: ' + error.message);
+      }
+    }
+
+    async function gradeSubmission() {
+      const id = parseInt(document.getElementById('gradeSubmitId').value);
+      const data = {
+        score: parseInt(document.getElementById('gradeScore').value),
+        feedback: document.getElementById('gradeFeedback').value.trim() || null
+      };
+      if (isNaN(id) || id <= 0 || isNaN(data.score)) {
+        alert('Valid Submission ID and score are required');
+        return;
+      }
+      try {
+        const result = await apiFetch(`/submissions/${id}/grade`, 'POST', data);
+        alert('Submission graded: ' + result.message);
+        document.getElementById('gradeForm').reset();
+      } catch (error) {
+        alert('Grading failed: ' + error.message);
+      }
+    }
+
+    // UI Update
+    function updateUI() {
+      const token = getToken();
+      document.getElementById('authSection').style.display = token ? 'none' : 'block';
+      document.getElementById('protectedSection').style.display = token ? 'block' : 'none';
+    }
+
+    // Dynamic form adjustments
+    document.addEventListener('DOMContentLoaded', () => {
+      document.getElementById('regRole').addEventListener('change', function() {
+        const role = this.value;
+        document.getElementById('regGrade').style.display = role === 'student' ? 'block' : 'none';
+        document.getElementById('regYear').style.display = role === 'student' ? 'block' : 'none';
+        document.getElementById('regDept').style.display = role === 'teacher' ? 'block' : 'none';
+      });
+      updateUI();
+    });
+  </script>
+</head>
+<body class="bg-gray-100 p-6">
+  <div id="authSection" class="space-y-6">
+    <h1 class="text-2xl font-bold">Edusync - Authentication</h1>
+
+    <!-- Register Form -->
+    <div class="bg-white p-4 rounded shadow">
+      <h2 class="text-xl">Register</h2>
+      <form id="registerForm">
+        <input id="regName" placeholder="Name" class="border p-2 mb-2 w-full"><br>
+        <input id="regEmail" type="email" placeholder="Email" class="border p-2 mb-2 w-full"><br>
+        <input id="regPassword" type="password" placeholder="Password" class="border p-2 mb-2 w-full"><br>
+        <select id="regRole" class="border p-2 mb-2 w-full">
+          <option value="student">Student</option>
+          <option value="teacher">Teacher</option>
+        </select><br>
+        <input id="regContact" placeholder="Contact Number" class="border p-2 mb-2 w-full"><br>
+        <input id="regOrg" placeholder="Organization" class="border p-2 mb-2 w-full"><br>
+        <input id="regGrade" placeholder="Grade Level" class="border p-2 mb-2 w-full" style="display:none"><br>
+        <input id="regYear" type="number" placeholder="Enrollment Year" class="border p-2 mb-2 w-full" style="display:none"><br>
+        <input id="regDept" placeholder="Department" class="border p-2 mb-2 w-full" style="display:none"><br>
+        <button type="button" onclick="handleRegister()" class="bg-blue-500 text-white p-2 rounded">Register</button>
+      </form>
+    </div>
+
+    <!-- Login Form -->
+    <div class="bg-white p-4 rounded shadow">
+      <h2 class="text-xl">Login</h2>
+      <form id="loginForm">
+        <input id="loginEmail" type="email" placeholder="Email" class="border p-2 mb-2 w-full"><br>
+        <input id="loginPassword" type="password" placeholder="Password" class="border p-2 mb-2 w-full"><br>
+        <button type="button" onclick="handleLogin()" class="bg-blue-500 text-white p-2 rounded">Login</button>
+      </form>
+    </div>
+  </div>
+
+  <div id="protectedSection" class="space-y-6 hidden">
+    <h1 class="text-2xl font-bold">Edusync - Teacher Dashboard</h1>
+    <button onclick="handleLogout()" class="bg-red-500 text-white p-2 rounded">Logout</button>
+
+    <!-- Profile -->
+    <div class="bg-white p-4 rounded shadow">
+      <h2 class="text-xl">Profile</h2>
+      <button onclick="fetchProfile()" class="bg-green-500 text-white p-2 rounded">Get Profile</button>
+      <pre id="profileData" class="mt-2"></pre>
+    </div>
+
+    <!-- Classroom Management -->
+    <div class="bg-white p-4 rounded shadow">
+      <h2 class="text-xl">Classrooms</h2>
+      <button onclick="fetchClassrooms()" class="bg-green-500 text-white p-2 rounded">Get Classrooms</button>
+      <pre id="classroomsData" class="mt-2"></pre>
+      <h3>Create Classroom</h3>
+      <form id="classroomForm">
+        <input id="classTitle" placeholder="Title" class="border p-2 mb-2 w-full"><br>
+        <input id="classDesc" placeholder="Description" class="border p-2 mb-2 w-full"><br>
+        <input id="classStart" type="date" placeholder="Start Date" class="border p-2 mb-2 w-full"><br>
+        <input id="classEnd" type="date" placeholder="End Date" class="border p-2 mb-2 w-full"><br>
+        <input id="classSubject" placeholder="Subject Area" class="border p-2 mb-2 w-full"><br>
+        <button type="button" onclick="createClassroom()" class="bg-blue-500 text-white p-2 rounded">Create</button>
+      </form>
+      <h3>Update Classroom</h3>
+      <form id="updateClassroomForm">
+        <input id="updateClassId" type="number" placeholder="Course ID" class="border p-2 mb-2 w-full"><br>
+        <input id="updateClassTitle" placeholder="Title" class="border p-2 mb-2 w-full"><br>
+        <input id="updateClassDesc" placeholder="Description" class="border p-2 mb-2 w-full"><br>
+        <input id="updateClassStart" type="date" placeholder="Start Date" class="border p-2 mb-2 w-full"><br>
+        <input id="updateClassEnd" type="date" placeholder="End Date" class="border p-2 mb-2 w-full"><br>
+        <input id="updateClassSubject" placeholder="Subject Area" class="border p-2 mb-2 w-full"><br>
+        <button type="button" onclick="updateClassroom()" class="bg-blue-500 text-white p-2 rounded">Update</button>
+      </form>
+      <h3>Delete Classroom</h3>
+      <input id="deleteClassId" type="number" placeholder="Course ID" class="border p-2 mb-2 w-full"><br>
+      <button onclick="deleteClassroom()" class="bg-red-500 text-white p-2 rounded">Delete</button>
+    </div>
+
+    <!-- Assignment Management -->
+    <div class="bg-white p-4 rounded shadow">
+      <h2 class="text-xl">Assignment Management</h2>
+      <h3>Create Assignment</h3>
+      <form id="assignmentForm">
+        <input id="assignCourseId" type="number" placeholder="Course ID" class="border p-2 mb-2 w-full">
+        <input id="assignTitle" placeholder="Title" class="border p-2 mb-2 w-full">
+        <input id="assignDesc" placeholder="Description" class="border p-2 mb-2 w-full">
+        <input id="assignDueDate" type="datetime-local" placeholder="Due Date" class="border p-2 mb-2 w-full">
+        <input id="assignMaxPoints" type="number" placeholder="Max Points" class="border p-2 mb-2 w-full">
+        <button type="button" onclick="createAssignment()" class="bg-blue-500 text-white p-2 rounded">Create</button>
+      </form>
+      <h3>Get Assignments by Classroom</h3>
+      <input id="fetchAssignCourseId" type="number" placeholder="Course ID" class="border p-2 mb-2 w-full">
+      <button onclick="fetchAssignmentsByClassroom()" class="bg-green-500 text-white p-2 rounded">Get Assignments</button>
+      <pre id="assignmentsData" class="mt-2"></pre>
+      <h3>Update Assignment</h3>
+      <form id="updateAssignmentForm">
+        <input id="updateAssignId" type="number" placeholder="Assignment ID" class="border p-2 mb-2 w-full">
+        <input id="updateAssignTitle" placeholder="Title" class="border p-2 mb-2 w-full">
+        <input id="updateAssignDesc" placeholder="Description" class="border p-2 mb-2 w-full">
+        <input id="updateAssignDueDate" type="datetime-local" placeholder="Due Date" class="border p-2 mb-2 w-full">
+        <input id="updateAssignMaxPoints" type="number" placeholder="Max Points" class="border p-2 mb-2 w-full">
+        <button type="button" onclick="updateAssignment()" class="bg-blue-500 text-white p-2 rounded">Update</button>
+      </form>
+      <h3>Delete Assignment</h3>
+      <input id="deleteAssignId" type="number" placeholder="Assignment ID" class="border p-2 mb-2 w-full">
+      <button onclick="deleteAssignment()" class="bg-red-500 text-white p-2 rounded">Delete</button>
+    </div>
+
+    <!-- Material Management -->
+    <div class="bg-white p-4 rounded shadow">
+      <h2 class="text-xl">Material Management</h2>
+      <h3>Create Material</h3>
+      <form id="materialForm">
+        <input id="matCourseId" type="number" placeholder="Course ID" class="border p-2 mb-2 w-full">
+        <input id="matTitle" placeholder="Title" class="border p-2 mb-2 w-full">
+        <input id="matDesc" placeholder="Description" class="border p-2 mb-2 w-full">
+        <select id="matType" class="border p-2 mb-2 w-full">
+          <option value="document">Document</option>
+          <option value="link">Link</option>
+          <option value="video">Video</option>
+        </select>
+        <input id="matFilePath" placeholder="File Path" class="border p-2 mb-2 w-full">
+        <button type="button" onclick="createMaterial()" class="bg-blue-500 text-white p-2 rounded">Create</button>
+      </form>
+      <h3>Get Materials by Classroom</h3>
+      <input id="fetchMatCourseId" type="number" placeholder="Course ID" class="border p-2 mb-2 w-full">
+      <button onclick="fetchMaterialsByClassroom()" class="bg-green-500 text-white p-2 rounded">Get Materials</button>
+      <pre id="materialsData" class="mt-2"></pre>
+      <h3>Update Material</h3>
+      <form id="updateMaterialForm">
+        <input id="updateMatId" type="number" placeholder="Material ID" class="border p-2 mb-2 w-full">
+        <input id="updateMatTitle" placeholder="Title" class="border p-2 mb-2 w-full">
+        <input id="updateMatDesc" placeholder="Description" class="border p-2 mb-2 w-full">
+        <select id="updateMatType" class="border p-2 mb-2 w-full">
+          <option value="document">Document</option>
+          <option value="link">Link</option>
+          <option value="video">Video</option>
+        </select>
+        <input id="updateMatFilePath" placeholder="File Path" class="border p-2 mb-2 w-full">
+        <button type="button" onclick="updateMaterial()" class="bg-blue-500 text-white p-2 rounded">Update</button>
+      </form>
+      <h3>Delete Material</h3>
+      <input id="deleteMatId" type="number" placeholder="Material ID" class="border p-2 mb-2 w-full">
+      <button onclick="deleteMaterial()" class="bg-red-500 text-white p-2 rounded">Delete</button>
+    </div>
+
+    <!-- Submission Management -->
+    <div class="bg-white p-4 rounded shadow">
+      <h2 class="text-xl">Submission Management</h2>
+      <h3>Get Submissions by Assignment</h3>
+      <input id="fetchSubmitAssignId" type="number" placeholder="Assignment ID" class="border p-2 mb-2 w-full">
+      <button onclick="fetchSubmissionsByAssignment()" class="bg-green-500 text-white p-2 rounded">Get Submissions</button>
+      <pre id="submissionsData" class="mt-2"></pre>
+      <h3>Grade Submission</h3>
+      <form id="gradeForm">
+        <input id="gradeSubmitId" type="number" placeholder="Submission ID" class="border p-2 mb-2 w-full">
+        <input id="gradeScore" type="number" placeholder="Score" class="border p-2 mb-2 w-full">
+        <input id="gradeFeedback" placeholder="Feedback" class="border p-2 mb-2 w-full">
+        <button type="button" onclick="gradeSubmission()" class="bg-blue-500 text-white p-2 rounded">Grade</button>
+      </form>
+    </div>
+  </div>
+</body>
+</html>

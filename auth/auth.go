@@ -1,73 +1,122 @@
 package auth
 
 import (
-	"fmt"
+	"database/sql"
+	"log"
 	"net/http"
-	"os"
 	"time"
 
+	"github.com/dgrijalva/jwt-go"
 	"github.com/gin-gonic/gin"
-	"github.com/golang-jwt/jwt/v4"
+	"golang.org/x/crypto/bcrypt"
 
+	"edusync/config"
 	"edusync/models"
 )
 
-// GenerateToken creates a new JWT token for a user
-func GenerateToken(userID int, role string) (string, error) {
-	// Create JWT token
-	expirationTime := time.Now().Add(24 * time.Hour)
-	claims := &models.Claims{
-		UserID: userID,
-		Role:   role,
-		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(expirationTime),
-		},
+// LoginHandler authenticates a user and returns a JWT token
+func LoginHandler(c *gin.Context) {
+	var req models.LoginRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body: " + err.Error()})
+		return
 	}
 
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	tokenString, err := token.SignedString([]byte(os.Getenv("JWT_SECRET")))
+	db := c.MustGet("db").(*sql.DB)
+	var user models.User
+	var password string
+	err := db.QueryRow(`
+		SELECT user_id, name, email, password, role 
+		FROM user 
+		WHERE email = ? AND archive_delete_flag = TRUE`, req.Email).Scan(
+		&user.UserID, &user.Name, &user.Email, &password, &user.Role,
+	)
 	if err != nil {
-		return "", err
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid email or password"})
+		} else {
+			log.Printf("Error querying user: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		}
+		return
 	}
 
-	return tokenString, nil
+	if err := bcrypt.CompareHashAndPassword([]byte(password), []byte(req.Password)); err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid email or password"})
+		return
+	}
+
+	claims := jwt.MapClaims{
+		"user_id": user.UserID,
+		"role":    user.Role,
+		"exp":     time.Now().Add(time.Hour * 24).Unix(),
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	tokenString, err := token.SignedString([]byte(config.ConfigInstance.JWTSecret))
+	if err != nil {
+		log.Printf("Error signing token: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error generating token"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"token": tokenString,
+		"user": gin.H{
+			"user_id": user.UserID,
+			"name":    user.Name,
+			"email":   user.Email,
+			"role":    user.Role,
+		},
+	})
 }
 
-// AuthMiddleware validates JWT tokens
+// AuthMiddleware verifies JWT token
 func AuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// Get token from Authorization header
 		tokenString := c.GetHeader("Authorization")
 		if tokenString == "" {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Authorization token required"})
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Authorization header required"})
 			c.Abort()
 			return
 		}
 
-		// Remove "Bearer " prefix if present
 		if len(tokenString) > 7 && tokenString[:7] == "Bearer " {
 			tokenString = tokenString[7:]
 		}
 
-		// Parse and validate token
-		claims := &models.Claims{}
-		token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
+		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+				return nil, jwt.ErrSignatureInvalid
 			}
-			return []byte(os.Getenv("JWT_SECRET")), nil
+			return []byte(config.ConfigInstance.JWTSecret), nil
 		})
 
-		if err != nil || !token.Valid {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired token"})
+		if err != nil {
+			log.Printf("Error parsing token: %v", err)
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token"})
 			c.Abort()
 			return
 		}
 
-		// Add claims to request context
-		c.Set("userID", claims.UserID)
-		c.Set("role", claims.Role)
-
-		c.Next()
+		if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
+			userID, ok := claims["user_id"].(float64)
+			if !ok {
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token claims"})
+				c.Abort()
+				return
+			}
+			role, ok := claims["role"].(string)
+			if !ok || (role != "teacher" && role != "student") {
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid role"})
+				c.Abort()
+				return
+			}
+			c.Set("userID", int(userID))
+			c.Set("role", role)
+			c.Next()
+		} else {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token"})
+			c.Abort()
+		}
 	}
 }

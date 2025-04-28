@@ -6,277 +6,178 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"golang.org/x/crypto/bcrypt"
 
-	"edusync/auth"
-	"edusync/db"
 	"edusync/models"
 	"edusync/utils"
 )
 
-// RegisterHandler uses root connection for all registrations
+// RegisterHandler creates a new user and associated teacher/student record
 func RegisterHandler(c *gin.Context) {
-	// Parse request body
 	var req models.RegisterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body: " + err.Error()})
 		return
 	}
 
-	// Validate input
-	if req.User.Email == "" || req.User.Password == "" || req.User.Name == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Name, email and password are required"})
+	if !utils.ValidateEmail(req.Email) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid email format"})
 		return
 	}
 
-	// Validate role
-	if req.User.Role != "student" && req.User.Role != "teacher" && req.User.Role != "admin" && req.User.Role != "dev" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid role"})
-		return
-	}
+	db := c.MustGet("db").(*sql.DB)
 
-	// Validate password strength
-	if err := utils.ValidatePassword(req.User.Password); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	// Check for existing email
+	var existingEmail string
+	err := db.QueryRow("SELECT email FROM user WHERE email = ? AND archive_delete_flag = TRUE", req.Email).Scan(&existingEmail)
+	if err == nil {
+		c.JSON(http.StatusConflict, gin.H{"error": "Email already exists"})
 		return
-	}
-
-	// Always use rootDB for registration
-	// Check if user with email already exists
-	var count int
-	err := db.RootDB.QueryRow("SELECT COUNT(*) FROM user WHERE email = ?", req.User.Email).Scan(&count)
-	if err != nil {
+	} else if err != sql.ErrNoRows {
+		log.Printf("Error checking existing email: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
-		log.Printf("Error checking email existence: %v", err)
 		return
 	}
 
-	if count > 0 {
-		c.JSON(http.StatusConflict, gin.H{"error": "Email already registered"})
-		return
-	}
-
-	// Hash the password
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.User.Password), bcrypt.DefaultCost)
+	passwordHash, err := utils.HashPassword(req.Password)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error processing your request"})
 		log.Printf("Error hashing password: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to hash password"})
 		return
 	}
 
-	// Begin transaction
-	tx, err := db.RootDB.Begin()
+	tx, err := db.Begin()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
 		log.Printf("Error starting transaction: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start transaction"})
 		return
 	}
-	defer tx.Rollback() // Will be ignored if tx.Commit() is called
+	defer tx.Rollback()
 
-	// Insert into user table
-	result, err := tx.Exec(
-		"INSERT INTO user (name, email, password, role, contact_number, profile_picture, org) VALUES (?, ?, ?, ?, ?, ?, ?)",
-		req.User.Name, req.User.Email, hashedPassword, req.User.Role, req.User.ContactNum, req.User.ProfilePic, req.User.Org,
-	)
+	result, err := tx.Exec(`
+		INSERT INTO user (name, email, password, role, contact_number, profile_picture, org, archive_delete_flag)
+		VALUES (?, ?, ?, ?, ?, ?, ?, TRUE)`,
+		req.Name, req.Email, passwordHash, req.Role, req.ContactNumber, req.ProfilePicture, req.Org)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error registering user"})
 		log.Printf("Error inserting user: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create user"})
 		return
 	}
 
 	userID, err := result.LastInsertId()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error retrieving user ID"})
-		log.Printf("Error getting last insert ID: %v", err)
+		log.Printf("Error retrieving user ID: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve user ID"})
 		return
 	}
 
-	// Insert role-specific data
-	switch req.User.Role {
-	case "student":
-		if req.Student == nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Student data is required for student role"})
-			return
-		}
-
-		_, err := tx.Exec(
-			"INSERT INTO student (user_id, grade_level, enrollment_year) VALUES (?, ?, ?)",
-			userID, req.Student.GradeLevel, req.Student.EnrollmentYear,
-		)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error registering student"})
-			log.Printf("Error inserting student data: %v", err)
-			return
-		}
-
-	case "teacher":
-		if req.Teacher == nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Teacher data is required for teacher role"})
-			return
-		}
-
-		_, err := tx.Exec(
-			"INSERT INTO teacher (user_id, dept) VALUES (?, ?)",
-			userID, req.Teacher.Dept,
-		)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error registering teacher"})
-			log.Printf("Error inserting teacher data: %v", err)
-			return
-		}
+	if req.Role == "teacher" {
+		_, err = tx.Exec(`
+			INSERT INTO teacher (user_id, dept, archive_delete_flag)
+			VALUES (?, ?, TRUE)`, userID, req.Dept)
+	} else {
+		_, err = tx.Exec(`
+			INSERT INTO student (user_id, grade_level, enrollment_year, archive_delete_flag)
+			VALUES (?, ?, ?, TRUE)`, userID, req.GradeLevel, req.EnrollmentYear)
+	}
+	if err != nil {
+		log.Printf("Error inserting %s: %v", req.Role, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create " + req.Role + " profile"})
+		return
 	}
 
-	// Commit transaction
 	if err := tx.Commit(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
 		log.Printf("Error committing transaction: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit transaction"})
 		return
 	}
-
-	// Return success response
-	c.JSON(http.StatusCreated, gin.H{"message": "User registered successfully"})
-}
-
-// LoginHandler handles user login
-func LoginHandler(c *gin.Context) {
-	// Parse request body
-	var req models.LoginRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
-		return
-	}
-
-	// Validate input
-	if req.Email == "" || req.Password == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Email and password are required"})
-		return
-	}
-
-	// Use root DB to get user initially (to determine role)
-	var user models.User
-	var hashedPassword string
-	err := db.RootDB.QueryRow(
-		"SELECT user_id, name, email, password, role, contact_number, profile_picture, org, created_at FROM user WHERE email = ?",
-		req.Email,
-	).Scan(&user.ID, &user.Name, &user.Email, &hashedPassword, &user.Role, &user.ContactNum, &user.ProfilePic, &user.Org, &user.CreatedAt)
-
-	if err != nil {
-		if err == sql.ErrNoRows {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid email or password"})
-		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
-			log.Printf("Error retrieving user: %v", err)
-		}
-		return
-	}
-
-	// Compare passwords
-	err = bcrypt.CompareHashAndPassword([]byte(hashedPassword), []byte(req.Password))
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid email or password"})
-		return
-	}
-
-	// Generate JWT token
-	tokenString, err := auth.GenerateToken(user.ID, user.Role)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error generating token"})
-		log.Printf("Error signing token: %v", err)
-		return
-	}
-
-	// Return token and user info
-	user.Password = "" // Don't send password back
-	response := models.LoginResponse{
-		Token: tokenString,
-		User:  user,
-	}
-
-	c.JSON(http.StatusOK, response)
-}
-
-// GetProfileHandler is an example of a protected endpoint
-func GetProfileHandler(c *gin.Context) {
-	// Get user ID and role from context (set by authMiddleware)
-	userID := c.MustGet("userID").(int)
-	role := c.MustGet("role").(string)
-
-	// Use the appropriate DB connection based on role
-	database := db.GetDBForRole(role)
-
-	// Get user info
-	var user models.User
-	err := database.QueryRow(
-		"SELECT user_id, name, email, role, contact_number, profile_picture, org, created_at FROM user WHERE user_id = ?",
-		userID,
-	).Scan(&user.ID, &user.Name, &user.Email, &user.Role, &user.ContactNum, &user.ProfilePic, &user.Org, &user.CreatedAt)
-
-	if err != nil {
-		if err == sql.ErrNoRows {
-			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
-		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
-			log.Printf("Error retrieving user profile: %v", err)
-		}
-		return
-	}
-
-	// Get role-specific data
-	switch role {
-	case "student":
-		var student models.Student
-		err := database.QueryRow(
-			"SELECT student_id, grade_level, enrollment_year FROM student WHERE user_id = ?",
-			userID,
-		).Scan(&student.StudentID, &student.GradeLevel, &student.EnrollmentYear)
-
-		if err != nil && err != sql.ErrNoRows {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error retrieving student data"})
-			log.Printf("Error retrieving student data: %v", err)
-			return
-		}
-
-		// Return user with student data
-		c.JSON(http.StatusOK, gin.H{
-			"user":    user,
-			"student": student,
-		})
-
-	case "teacher":
-		var teacher models.Teacher
-		err := database.QueryRow(
-			"SELECT teacher_id, dept FROM teacher WHERE user_id = ?",
-			userID,
-		).Scan(&teacher.TeacherID, &teacher.Dept)
-
-		if err != nil && err != sql.ErrNoRows {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error retrieving teacher data"})
-			log.Printf("Error retrieving teacher data: %v", err)
-			return
-		}
-
-		// Return user with teacher data
-		c.JSON(http.StatusOK, gin.H{
-			"user":    user,
-			"teacher": teacher,
-		})
-
-	default:
-		// For admin and dev roles, just return user data
-		c.JSON(http.StatusOK, user)
-	}
-}
-
-// CheckAuthHandler is a simple endpoint to check if the user is authenticated
-func CheckAuthHandler(c *gin.Context) {
-	// This endpoint just returns info about the authenticated user
-	userID := c.MustGet("userID").(int)
-	role := c.MustGet("role").(string)
 
 	c.JSON(http.StatusOK, gin.H{
-		"authenticated": true,
-		"user_id":       userID,
-		"role":          role,
-		"db_connection": role, // Indicates which DB connection would be used
+		"user_id": userID,
+		"name":    req.Name,
+		"email":   req.Email,
+		"role":    req.Role,
 	})
+}
+
+// GetProfileHandler returns the authenticated user's profile
+func GetProfileHandler(c *gin.Context) {
+	userID, _ := c.Get("userID")
+	role, _ := c.Get("role")
+
+	db := c.MustGet("db").(*sql.DB)
+	var user models.User
+	err := db.QueryRow(`
+		SELECT user_id, name, email, role, contact_number, profile_picture, org
+		FROM user 
+		WHERE user_id = ? AND archive_delete_flag = TRUE`, userID).Scan(
+		&user.UserID, &user.Name, &user.Email, &user.Role, &user.ContactNumber, &user.ProfilePicture, &user.Org,
+	)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+		return
+	} else if err != nil {
+		log.Printf("Error querying user: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		return
+	}
+
+	var profile interface{}
+	if role == "teacher" {
+		var teacher models.Teacher
+		err = db.QueryRow(`
+			SELECT teacher_id, user_id, dept
+			FROM teacher 
+			WHERE user_id = ? AND archive_delete_flag = TRUE`, userID).Scan(
+			&teacher.TeacherID, &teacher.UserID, &teacher.Dept,
+		)
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Teacher profile not found"})
+			return
+		} else if err != nil {
+			log.Printf("Error querying teacher: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+			return
+		}
+		profile = gin.H{
+			"user":    user,
+			"teacher": teacher,
+		}
+	} else {
+		var student models.Student
+		err = db.QueryRow(`
+			SELECT student_id, user_id, grade_level, enrollment_year
+			FROM student 
+			WHERE user_id = ? AND archive_delete_flag = TRUE`, userID).Scan(
+			&student.StudentID, &student.UserID, &student.GradeLevel, &student.EnrollmentYear,
+		)
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Student profile not found"})
+			return
+		} else if err != nil {
+			log.Printf("Error querying student: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+			return
+		}
+		profile = gin.H{
+			"user":    user,
+			"student": student,
+		}
+	}
+
+	c.JSON(http.StatusOK, profile)
+}
+
+// CheckAuthHandler verifies authentication
+func CheckAuthHandler(c *gin.Context) {
+	userID, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found in context"})
+		return
+	}
+	role, exists := c.Get("role")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Role not found in context"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"user_id": userID, "role": role})
 }

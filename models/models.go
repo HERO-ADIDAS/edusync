@@ -1,109 +1,121 @@
 package models
 
-import (
-	"github.com/golang-jwt/jwt/v4"
-	"time"
-)
+import "time"
 
-// User represents the user data structure
-type User struct {
-	ID          int       `json:"id,omitempty" db:"user_id"`
-	Name        string    `json:"name" db:"name"`
-	Email       string    `json:"email" db:"email"`
-	Password    string    `json:"password,omitempty" db:"password"`
-	Role        string    `json:"role" db:"role"`
-	ContactNum  string    `json:"contact_number,omitempty" db:"contact_number"`
-	ProfilePic  string    `json:"profile_picture,omitempty" db:"profile_picture"`
-	Org         string    `json:"org,omitempty" db:"org"`
-	CreatedAt   time.Time `json:"created_at,omitempty" db:"created_at"`
-}
-
-// Student specific data
-type Student struct {
-	StudentID      int    `json:"student_id,omitempty" db:"student_id"`
-	UserID         int    `json:"user_id,omitempty" db:"user_id"`
-	GradeLevel     string `json:"grade_level" db:"grade_level"`
-	EnrollmentYear int    `json:"enrollment_year" db:"enrollment_year"`
-}
-
-// Teacher specific data
-type Teacher struct {
-	TeacherID int    `json:"teacher_id,omitempty" db:"teacher_id"`
-	UserID    int    `json:"user_id,omitempty" db:"user_id"`
-	Dept      string `json:"dept" db:"dept"`
-	Name      string `json:"name,omitempty" db:"name"` // Added to match teacher.go queries
-}
-
-// Classroom represents a classroom entity
-type Classroom struct {
-	CourseID     int       `json:"course_id" db:"course_id"`
-	TeacherID    int       `json:"teacher_id" db:"teacher_id"`
-	Title        string    `json:"title" db:"title"`
-	Description  string    `json:"description" db:"description"`
-	StartDate    time.Time `json:"start_date" db:"start_date"`
-	EndDate      time.Time `json:"end_date" db:"end_date"`
-	SubjectArea  string    `json:"subject_area" db:"subject_area"`
-}
-
-// Enrollment represents an enrollment record
-type Enrollment struct {
-	EnrollmentID   int       `json:"enrollment_id,omitempty" db:"enrollment_id"`
-	StudentID      int       `json:"student_id,omitempty" db:"student_id"`
-	CourseID       int       `json:"course_id,omitempty" db:"course_id"`
-	EnrollmentDate time.Time `json:"enrollment_date,omitempty" db:"enrollment_date"`
-	Status         string    `json:"status" db:"status"`
-}
-
-// Assignment represents an assignment entity
-type Assignment struct {
-	AssignmentID int       `json:"assignment_id" db:"assignment_id"`
-	CourseID     int       `json:"course_id" db:"course_id"`
-	Title        string    `json:"title" db:"title"`
-	Description  string    `json:"description" db:"description"`
-	DueDate      time.Time `json:"due_date" db:"due_date"`
-	CreatedAt    time.Time `json:"created_at" db:"created_at"`
-	MaxPoints    int       `json:"max_points" db:"max_points"`
-	IsActive     bool      `json:"is_active" db:"is_active"`
-	AllowLate    bool      `json:"allow_late" db:"allow_late"`
-	Materials    []int     `json:"materials,omitempty" db:"materials"` // Assumed join table reference
-}
-
-// Submission represents a submission entity
-type Submission struct {
-	SubmissionID int       `json:"submission_id" db:"submission_id"`
-	AssignmentID int       `json:"assignment_id" db:"assignment_id"`
-	StudentID    int       `json:"student_id" db:"student_id"`
-	Link         string    `json:"link" db:"content"` // Changed from content to link, maps to content column
-	SubmittedAt  time.Time `json:"submitted_at" db:"submitted_at"`
-	Score        int       `json:"score" db:"score"`
-	Feedback     string    `json:"feedback" db:"feedback"`
-	Status       string    `json:"status" db:"status"`
-	IsLate       bool      `json:"is_late" db:"is_late"`
-	GradedAt     *time.Time `json:"graded_at,omitempty" db:"graded_at"` // Optional graded timestamp
-}
-
-// RegisterRequest combines user data with role-specific data
-type RegisterRequest struct {
-	User    User     `json:"user"`
-	Student *Student `json:"student,omitempty"`
-	Teacher *Teacher `json:"teacher,omitempty"`
-}
-
-// LoginRequest contains login credentials
+// LoginRequest for authentication
 type LoginRequest struct {
-	Email    string `json:"email"`
-	Password string `json:"password"`
+	Email    string `json:"email" binding:"required,email"`
+	Password string `json:"password" binding:"required"`
 }
 
-// LoginResponse contains JWT token and user info
-type LoginResponse struct {
-	Token string `json:"token"`
-	User  User   `json:"user"`
+// RegisterRequest for user registration
+type RegisterRequest struct {
+	Name           string  `json:"name" binding:"required"`
+	Email          string  `json:"email" binding:"required,email"`
+	Password       string  `json:"password" binding:"required"`
+	Role           string  `json:"role" binding:"required,oneof=teacher student"`
+	ContactNumber  *string `json:"contact_number"`
+	ProfilePicture *string `json:"profile_picture"`
+	Org            *string `json:"org"`
+	Dept           *string `json:"dept"`           // For teacher
+	GradeLevel     *string `json:"grade_level"`    // For student
+	EnrollmentYear *int    `json:"enrollment_year"` // For student
 }
 
-// Claims for JWT token
-type Claims struct {
-	UserID int    `json:"user_id"`
-	Role   string `json:"role"`
-	jwt.RegisteredClaims
+// User model
+type User struct {
+	UserID         int       `json:"user_id"`
+	Name           string    `json:"name"`
+	Email          string    `json:"email"`
+	Password       string    `json:"password"`
+	CreatedAt      time.Time `json:"created_at"`
+	ContactNumber  *string   `json:"contact_number"`
+	ProfilePicture *string   `json:"profile_picture"`
+	Role           string    `json:"role"`
+	Org            *string   `json:"org"`
+}
+
+// Teacher model
+type Teacher struct {
+	TeacherID int     `json:"teacher_id"`
+	UserID    int     `json:"user_id"`
+	Dept      *string `json:"dept"`
+}
+
+// Student model
+type Student struct {
+	StudentID      int     `json:"student_id"`
+	UserID         int     `json:"user_id"`
+	GradeLevel     *string `json:"grade_level"`
+	EnrollmentYear *int    `json:"enrollment_year"`
+}
+
+// Classroom model
+type Classroom struct {
+	CourseID     int       `json:"course_id"`
+	TeacherID    int       `json:"teacher_id"`
+	Title        string    `json:"title"`
+	Description  *string   `json:"description"`
+	StartDate    *time.Time `json:"start_date"`
+	EndDate      *time.Time `json:"end_date"`
+	SubjectArea  *string   `json:"subject_area"`
+}
+
+// Enrollment model
+type Enrollment struct {
+	EnrollmentID   int       `json:"enrollment_id"`
+	StudentID      int       `json:"student_id"`
+	CourseID       int       `json:"course_id"`
+	EnrollmentDate time.Time `json:"enrollment_date"`
+	Status         string    `json:"status"`
+}
+
+// UpdateStudentProfileRequest for profile updates
+type UpdateStudentProfileRequest struct {
+	GradeLevel     *string `json:"grade_level"`
+	EnrollmentYear *int    `json:"enrollment_year"`
+}
+
+// Material model
+type Material struct {
+	MaterialID  int       `json:"material_id"`
+	CourseID    int       `json:"course_id"`
+	Title       string    `json:"title"`
+	Type        *string   `json:"type"`
+	FilePath    *string   `json:"file_path"`
+	UploadedAt  time.Time `json:"uploaded_at"`
+	Description *string   `json:"description"`
+}
+
+// Announcement model
+type Announcement struct {
+	AnnouncementID int       `json:"announcement_id"`
+	CourseID       int       `json:"course_id"`
+	Title          string    `json:"title"`
+	Content        *string   `json:"content"`
+	CreatedAt      time.Time `json:"created_at"`
+	IsPinned       bool      `json:"is_pinned"`
+}
+
+// Assignment model
+type Assignment struct {
+	AssignmentID int       `json:"assignment_id"`
+	CourseID     int       `json:"course_id"`
+	Title        string    `json:"title"`
+	Description  *string   `json:"description"`
+	DueDate      time.Time `json:"due_date"`
+	MaxPoints    int       `json:"max_points"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+// Submission model
+type Submission struct {
+	SubmissionID int       `json:"submission_id"`
+	AssignmentID int       `json:"assignment_id"`
+	StudentID    int       `json:"student_id"`
+	Content      *string   `json:"content"`
+	SubmittedAt  time.Time `json:"submitted_at"`
+	Score        *int      `json:"score"`
+	Feedback     *string   `json:"feedback"`
+	Status       string    `json:"status"`
 }
