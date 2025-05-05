@@ -46,10 +46,17 @@ func SetupRoutes(r *gin.Engine) {
 	protected.PUT("/materials/:id", handlers.UpdateMaterialHandler)
 	protected.DELETE("/materials/:id", handlers.DeleteMaterialHandler)
 	protected.GET("/classrooms/:id/materials", handlers.GetMaterialsByClassroomHandler)
-	protected.POST("/submissions/:id/grade", handlers.GradeSubmissionHandler) // Changed from PUT to POST
+	protected.POST("/submissions/:id/grade", handlers.GradeSubmissionHandler)
 	protected.GET("/assignments/:assignment_id/submissions", handlers.GetSubmissionsByAssignmentHandler)
-	protected.PUT("/teacher/profile", handlers.UpdateTeacherProfileHandler)
+	protected.PUT("/teacher/profile", handlers.UpdateTeacherHandler)
+	protected.GET("/teacher/profile", handlers.GetTeacherProfileHandler)
 	protected.GET("/teacher/dashboard", handlers.GetTeacherDashboardHandler)
+	protected.GET("/classrooms/:id/students", handlers.GetEnrolledStudentsHandler)
+	protected.DELETE("/classrooms/:id/students/:student_id", handlers.RemoveStudentFromClassroomHandler)
+	protected.GET("/classrooms/:id/students/:student_id", handlers.GetStudentProfileHandler)
+	protected.GET("/assignments/:assignment_id/stats", handlers.GetAssignmentStatsHandler)
+	protected.GET("/teacher/assignments/upcoming", handlers.GetUpcomingAssignmentsHandler)
+	protected.GET("/assignments/:assignment_id/statistics", handlers.GetAssignmentStatisticsHandler)
 
 	// Student routes
 	protected.POST("/submissions", handlers.CreateSubmissionHandler)

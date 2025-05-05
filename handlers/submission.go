@@ -438,3 +438,135 @@ func GetSubmissionsByAssignmentHandler(c *gin.Context) {
 
 	c.JSON(http.StatusOK, submissions)
 }
+
+// GetAssignmentStatisticsHandler retrieves statistics for an assignment (average grade, submission rate)
+func GetAssignmentStatisticsHandler(c *gin.Context) {
+	userID, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found in context"})
+		return
+	}
+	role, exists := c.Get("role")
+	if !exists || role != "teacher" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Only teachers can view assignment statistics"})
+		return
+	}
+
+	userIDInt, ok := userID.(int)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid user ID type"})
+		return
+	}
+
+	assignmentID, err := strconv.Atoi(c.Param("assignment_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid assignment ID"})
+		return
+	}
+
+	// Check if the assignment exists
+	db := c.MustGet("db").(*sql.DB)
+	var assignmentExists bool
+	err = db.QueryRow(`
+		SELECT EXISTS (
+			SELECT 1 FROM assignment 
+			WHERE assignment_id = ? AND archive_delete_flag = TRUE
+		)`, assignmentID).Scan(&assignmentExists)
+	if err != nil {
+		log.Printf("Error checking assignment existence: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		return
+	}
+	if !assignmentExists {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Assignment not found"})
+		return
+	}
+
+	// Check if the teacher is authorized to view statistics for this assignment
+	var teacherID int
+	err = db.QueryRow(`
+		SELECT t.teacher_id
+		FROM assignment a
+		JOIN classroom c ON a.course_id = c.course_id
+		JOIN teacher t ON c.teacher_id = t.teacher_id
+		WHERE a.assignment_id = ? AND a.archive_delete_flag = TRUE
+		AND c.archive_delete_flag = TRUE AND t.archive_delete_flag = TRUE
+		AND t.user_id = ?`, assignmentID, userIDInt).Scan(&teacherID)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Unauthorized to view statistics for this assignment"})
+		return
+	} else if err != nil {
+		log.Printf("Error checking teacher authorization: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		return
+	}
+
+	// Get the course ID for the assignment
+	var courseID int
+	err = db.QueryRow(`
+		SELECT course_id FROM assignment 
+		WHERE assignment_id = ? AND archive_delete_flag = TRUE`, assignmentID).Scan(&courseID)
+	if err != nil {
+		log.Printf("Error querying course ID: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		return
+	}
+
+	// Get the total number of enrolled students
+	var totalStudents int
+	err = db.QueryRow(`
+		SELECT COUNT(*) 
+		FROM enrollment 
+		WHERE course_id = ? AND archive_delete_flag = TRUE`, courseID).Scan(&totalStudents)
+	if err != nil {
+		log.Printf("Error counting enrolled students: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		return
+	}
+
+	// Get the number of submissions
+	var submissionCount int
+	err = db.QueryRow(`
+		SELECT COUNT(*) 
+		FROM submission 
+		WHERE assignment_id = ? AND archive_delete_flag = TRUE`, assignmentID).Scan(&submissionCount)
+	if err != nil {
+		log.Printf("Error counting submissions: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		return
+	}
+
+	// Calculate submission rate
+	var submissionRate float64
+	if totalStudents > 0 {
+		submissionRate = (float64(submissionCount) / float64(totalStudents)) * 100
+	} else {
+		submissionRate = 0
+	}
+
+	// Get the average grade (only for submissions that are graded, i.e., have a non-null score)
+	var averageGrade sql.NullFloat64
+	err = db.QueryRow(`
+		SELECT AVG(score)
+		FROM submission 
+		WHERE assignment_id = ? AND status = 'graded' AND score IS NOT NULL AND archive_delete_flag = TRUE`, assignmentID).Scan(&averageGrade)
+	if err != nil {
+		log.Printf("Error calculating average grade: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		return
+	}
+
+	// Handle the case where there are no graded submissions
+	avgGrade := 0.0
+	if averageGrade.Valid {
+		avgGrade = averageGrade.Float64
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"assignment_id":    assignmentID,
+		"average_grade":    avgGrade,
+		"submission_rate":  submissionRate,
+		"total_students":   totalStudents,
+		"submission_count": submissionCount,
+	})
+}
