@@ -20,15 +20,15 @@ func SetupRoutes(r *gin.Engine) {
 	r.POST("/api/register", handlers.RegisterHandler)
 	r.POST("/api/login", auth.LoginHandler)
 
-	// Protected routes
+	// Protected routes (require authentication)
 	protected := r.Group("/api")
 	protected.Use(auth.AuthMiddleware())
 
-	// User routes
+	// General user routes
 	protected.GET("/profile", handlers.GetProfileHandler)
 	protected.GET("/auth/check", handlers.CheckAuthHandler)
 
-	// Teacher routes
+	// Teacher-specific routes
 	protected.POST("/classrooms", handlers.CreateClassroomHandler)
 	protected.PUT("/classrooms/:id", handlers.UpdateClassroomHandler)
 	protected.DELETE("/classrooms/:id", handlers.DeleteClassroomHandler)
@@ -46,21 +46,24 @@ func SetupRoutes(r *gin.Engine) {
 	protected.PUT("/materials/:id", handlers.UpdateMaterialHandler)
 	protected.DELETE("/materials/:id", handlers.DeleteMaterialHandler)
 	protected.GET("/classrooms/:id/materials", handlers.GetMaterialsByClassroomHandler)
-	protected.POST("/submissions/:id/grade", handlers.GradeSubmissionHandler)
-	protected.GET("/assignments/:assignment_id/submissions", handlers.GetSubmissionsByAssignmentHandler)
 	protected.PUT("/teacher/profile", handlers.UpdateTeacherHandler)
 	protected.GET("/teacher/profile", handlers.GetTeacherProfileHandler)
 	protected.GET("/teacher/dashboard", handlers.GetTeacherDashboardHandler)
 	protected.GET("/classrooms/:id/students", handlers.GetEnrolledStudentsHandler)
 	protected.DELETE("/classrooms/:id/students/:student_id", handlers.RemoveStudentFromClassroomHandler)
 	protected.GET("/classrooms/:id/students/:student_id", handlers.GetStudentProfileHandler)
-	protected.GET("/assignments/:assignment_id/stats", handlers.GetAssignmentStatsHandler)
 	protected.GET("/teacher/assignments/upcoming", handlers.GetUpcomingAssignmentsHandler)
 	protected.GET("/assignments/:assignment_id/statistics", handlers.GetAssignmentStatisticsHandler)
 
-	// Student routes
+	// Submission routes (shared by teachers and students)
+	protected.POST("/submissions/:id/grade", handlers.GradeSubmissionHandler)                            // Teacher: Grade a submission
+	protected.GET("/assignments/:assignment_id/submissions", handlers.GetSubmissionsByAssignmentHandler) // Teacher/Student: View submissions for an assignment
+	protected.GET("/submissions/:id", handlers.GetSubmissionHandler)                                     // Student: View a specific submission (handler needs implementation)
+
+	// Student-specific routes
 	protected.POST("/submissions", handlers.CreateSubmissionHandler)
 	protected.PUT("/submissions/:id", handlers.UpdateSubmissionHandler)
+	protected.GET("/student/submissions", handlers.GetStudentSubmissionsHandler) // Student: View all their submissions (handler needs implementation)
 	protected.POST("/enroll", handlers.EnrollStudentHandler)
 	protected.GET("/student/enrollments", handlers.GetStudentEnrollmentsHandler)
 	protected.PUT("/student/profile", handlers.UpdateStudentProfileHandler)

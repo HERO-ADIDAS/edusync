@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -40,38 +41,46 @@ func CreateSubmissionHandler(c *gin.Context) {
 		return
 	} else if err != nil {
 		log.Printf("Error querying student: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch student: " + err.Error()})
 		return
 	}
 
-	// Check if the assignment exists
-	var assignmentExists bool
+	// Check if the assignment exists and fetch due date
+	var courseID int
+	var dueDate time.Time
 	err = db.QueryRow(`
-		SELECT EXISTS (
-			SELECT 1 FROM assignment 
-			WHERE assignment_id = ? AND archive_delete_flag = TRUE
-		)`, req.AssignmentID).Scan(&assignmentExists)
-	if err != nil {
-		log.Printf("Error checking assignment existence: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		SELECT course_id, due_date FROM assignment 
+		WHERE assignment_id = ? AND archive_delete_flag = TRUE`, req.AssignmentID).Scan(&courseID, &dueDate)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Assignment not found"})
+		return
+	} else if err != nil {
+		log.Printf("Error querying assignment: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch assignment: " + err.Error()})
 		return
 	}
-	if !assignmentExists {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Assignment not found"})
+
+	// Check due date
+	if time.Now().After(dueDate) {
+		// Check if a submission exists
+		var existingSubmissionID int
+		err = db.QueryRow(`
+			SELECT submission_id FROM submission 
+			WHERE assignment_id = ? AND student_id = ? AND archive_delete_flag = TRUE`, req.AssignmentID, studentID).
+			Scan(&existingSubmissionID)
+		if err == nil {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Due date is over. You submitted on time, but you can no longer update your submission"})
+			return
+		} else if err != sql.ErrNoRows {
+			log.Printf("Error checking existing submission: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check existing submission: " + err.Error()})
+			return
+		}
+		c.JSON(http.StatusForbidden, gin.H{"error": "Due date is over. You cannot submit this assignment"})
 		return
 	}
 
 	// Check if the student is enrolled in the course
-	var courseID int
-	err = db.QueryRow(`
-		SELECT course_id FROM assignment 
-		WHERE assignment_id = ? AND archive_delete_flag = TRUE`, req.AssignmentID).Scan(&courseID)
-	if err != nil {
-		log.Printf("Error querying course ID: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
-		return
-	}
-
 	var enrolled bool
 	err = db.QueryRow(`
 		SELECT EXISTS (
@@ -80,7 +89,7 @@ func CreateSubmissionHandler(c *gin.Context) {
 		)`, studentID, courseID).Scan(&enrolled)
 	if err != nil {
 		log.Printf("Error checking enrollment: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check enrollment: " + err.Error()})
 		return
 	}
 	if !enrolled {
@@ -88,24 +97,41 @@ func CreateSubmissionHandler(c *gin.Context) {
 		return
 	}
 
+	// Check for existing submission
+	var existingSubmissionID int
+	err = db.QueryRow(`
+		SELECT submission_id FROM submission 
+		WHERE assignment_id = ? AND student_id = ? AND archive_delete_flag = TRUE`, req.AssignmentID, studentID).
+		Scan(&existingSubmissionID)
+	if err == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "You have already submitted this assignment"})
+		return
+	} else if err != sql.ErrNoRows {
+		log.Printf("Error checking existing submission: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check existing submission: " + err.Error()})
+		return
+	}
+
+	// Create submission
 	result, err := db.Exec(`
 		INSERT INTO submission (assignment_id, student_id, content, submitted_at, status, archive_delete_flag)
 		VALUES (?, ?, ?, NOW(), 'submitted', TRUE)`,
 		req.AssignmentID, studentID, req.Content)
 	if err != nil {
 		log.Printf("Error inserting submission: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create submission"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create submission: " + err.Error()})
 		return
 	}
 
 	submissionID, err := result.LastInsertId()
 	if err != nil {
 		log.Printf("Error retrieving submission ID: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve submission ID"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve submission ID: " + err.Error()})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
+		"message":       "Submission created successfully",
 		"submission_id": submissionID,
 		"assignment_id": req.AssignmentID,
 		"student_id":    studentID,
@@ -148,42 +174,59 @@ func UpdateSubmissionHandler(c *gin.Context) {
 		return
 	} else if err != nil {
 		log.Printf("Error querying student: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch student: " + err.Error()})
 		return
 	}
 
-	// Check if the submission exists and belongs to the student
-	var submissionExists bool
+	// Check if the submission exists and belongs to the student, and fetch assignment_id
+	var assignmentID int
 	err = db.QueryRow(`
-		SELECT EXISTS (
-			SELECT 1 FROM submission 
-			WHERE submission_id = ? AND student_id = ? AND archive_delete_flag = TRUE
-		)`, submissionID, studentID).Scan(&submissionExists)
-	if err != nil {
-		log.Printf("Error checking submission existence: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
-		return
-	}
-	if !submissionExists {
+		SELECT assignment_id FROM submission 
+		WHERE submission_id = ? AND student_id = ? AND archive_delete_flag = TRUE`, submissionID, studentID).
+		Scan(&assignmentID)
+	if err == sql.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Submission not found or unauthorized"})
 		return
+	} else if err != nil {
+		log.Printf("Error querying submission: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch submission: " + err.Error()})
+		return
 	}
 
+	// Fetch due date
+	var dueDate time.Time
+	err = db.QueryRow(`
+		SELECT due_date FROM assignment 
+		WHERE assignment_id = ? AND archive_delete_flag = TRUE`, assignmentID).Scan(&dueDate)
+	if err != nil {
+		log.Printf("Error querying assignment: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch assignment: " + err.Error()})
+		return
+	}
+
+	// Check due date
+	if time.Now().After(dueDate) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Due date is over. You can no longer update your submission"})
+		return
+	}
+
+	// Update submission
 	_, err = db.Exec(`
 		UPDATE submission 
-		SET content = ?, submitted_at = NOW(), status = ?
+		SET content = ?, submitted_at = NOW(), status = 'submitted'
 		WHERE submission_id = ? AND student_id = ? AND archive_delete_flag = TRUE`,
-		req.Content, req.Status, submissionID, studentID)
+		req.Content, submissionID, studentID)
 	if err != nil {
 		log.Printf("Error updating submission: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update submission"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update submission: " + err.Error()})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
+		"message":       "Submission updated successfully",
 		"submission_id": submissionID,
 		"content":       req.Content,
-		"status":        req.Status,
+		"status":        "submitted",
 	})
 }
 
@@ -222,7 +265,7 @@ func GradeSubmissionHandler(c *gin.Context) {
 		)`, submissionID).Scan(&submissionExists)
 	if err != nil {
 		log.Printf("Error checking submission existence: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check submission: " + err.Error()})
 		return
 	}
 	if !submissionExists {
@@ -246,7 +289,7 @@ func GradeSubmissionHandler(c *gin.Context) {
 		return
 	} else if err != nil {
 		log.Printf("Error querying teacher authorization: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check authorization: " + err.Error()})
 		return
 	}
 
@@ -266,7 +309,7 @@ func GradeSubmissionHandler(c *gin.Context) {
 		req.Score, req.Feedback, submissionID)
 	if err != nil {
 		log.Printf("Error grading submission: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to grade submission"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to grade submission: " + err.Error()})
 		return
 	}
 
@@ -307,7 +350,7 @@ func GetSubmissionsByAssignmentHandler(c *gin.Context) {
 		)`, assignmentID).Scan(&assignmentExists)
 	if err != nil {
 		log.Printf("Error checking assignment existence: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check assignment: " + err.Error()})
 		return
 	}
 	if !assignmentExists {
@@ -340,7 +383,7 @@ func GetSubmissionsByAssignmentHandler(c *gin.Context) {
 			return
 		} else if err != nil {
 			log.Printf("Error checking teacher authorization: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check authorization: " + err.Error()})
 			return
 		}
 
@@ -371,7 +414,7 @@ func GetSubmissionsByAssignmentHandler(c *gin.Context) {
 			return
 		} else if err != nil {
 			log.Printf("Error querying student: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch student: " + err.Error()})
 			return
 		}
 
@@ -382,7 +425,7 @@ func GetSubmissionsByAssignmentHandler(c *gin.Context) {
 			WHERE assignment_id = ? AND archive_delete_flag = TRUE`, assignmentID).Scan(&courseID)
 		if err != nil {
 			log.Printf("Error querying course ID: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch course: " + err.Error()})
 			return
 		}
 
@@ -394,7 +437,7 @@ func GetSubmissionsByAssignmentHandler(c *gin.Context) {
 			)`, studentID, courseID).Scan(&enrolled)
 		if err != nil {
 			log.Printf("Error checking enrollment: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check enrollment: " + err.Error()})
 			return
 		}
 		if !enrolled {
@@ -415,7 +458,7 @@ func GetSubmissionsByAssignmentHandler(c *gin.Context) {
 	rows, err := db.Query(query, args...)
 	if err != nil {
 		log.Printf("Error querying submissions: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch submissions: " + err.Error()})
 		return
 	}
 	defer rows.Close()
@@ -423,16 +466,26 @@ func GetSubmissionsByAssignmentHandler(c *gin.Context) {
 	var submissions []models.Submission
 	for rows.Next() {
 		var s models.Submission
-		if err := rows.Scan(&s.SubmissionID, &s.AssignmentID, &s.StudentID, &s.Content, &s.SubmittedAt, &s.Score, &s.Feedback, &s.Status); err != nil {
+		var score sql.NullInt64
+		var feedback sql.NullString
+		if err := rows.Scan(&s.SubmissionID, &s.AssignmentID, &s.StudentID, &s.Content, &s.SubmittedAt, &score, &feedback, &s.Status); err != nil {
 			log.Printf("Error scanning submission: %v", err)
 			continue
+		}
+		if score.Valid {
+			scoreValue := int(score.Int64)
+			s.Score = &scoreValue
+		}
+		if feedback.Valid {
+			feedbackValue := feedback.String
+			s.Feedback = &feedbackValue
 		}
 		submissions = append(submissions, s)
 	}
 
 	if err = rows.Err(); err != nil {
 		log.Printf("Error iterating submissions: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to iterate submissions: " + err.Error()})
 		return
 	}
 
@@ -474,7 +527,7 @@ func GetAssignmentStatisticsHandler(c *gin.Context) {
 		)`, assignmentID).Scan(&assignmentExists)
 	if err != nil {
 		log.Printf("Error checking assignment existence: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check assignment: " + err.Error()})
 		return
 	}
 	if !assignmentExists {
@@ -497,7 +550,7 @@ func GetAssignmentStatisticsHandler(c *gin.Context) {
 		return
 	} else if err != nil {
 		log.Printf("Error checking teacher authorization: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check authorization: " + err.Error()})
 		return
 	}
 
@@ -508,7 +561,7 @@ func GetAssignmentStatisticsHandler(c *gin.Context) {
 		WHERE assignment_id = ? AND archive_delete_flag = TRUE`, assignmentID).Scan(&courseID)
 	if err != nil {
 		log.Printf("Error querying course ID: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch course: " + err.Error()})
 		return
 	}
 
@@ -520,7 +573,7 @@ func GetAssignmentStatisticsHandler(c *gin.Context) {
 		WHERE course_id = ? AND archive_delete_flag = TRUE`, courseID).Scan(&totalStudents)
 	if err != nil {
 		log.Printf("Error counting enrolled students: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to count students: " + err.Error()})
 		return
 	}
 
@@ -532,7 +585,7 @@ func GetAssignmentStatisticsHandler(c *gin.Context) {
 		WHERE assignment_id = ? AND archive_delete_flag = TRUE`, assignmentID).Scan(&submissionCount)
 	if err != nil {
 		log.Printf("Error counting submissions: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to count submissions: " + err.Error()})
 		return
 	}
 
@@ -552,7 +605,7 @@ func GetAssignmentStatisticsHandler(c *gin.Context) {
 		WHERE assignment_id = ? AND status = 'graded' AND score IS NOT NULL AND archive_delete_flag = TRUE`, assignmentID).Scan(&averageGrade)
 	if err != nil {
 		log.Printf("Error calculating average grade: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to calculate average grade: " + err.Error()})
 		return
 	}
 
@@ -569,4 +622,161 @@ func GetAssignmentStatisticsHandler(c *gin.Context) {
 		"total_students":   totalStudents,
 		"submission_count": submissionCount,
 	})
+}
+
+// GetSubmissionHandler retrieves a specific submission by ID for a student
+func GetSubmissionHandler(c *gin.Context) {
+	userID, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found in context"})
+		return
+	}
+	role, exists := c.Get("role")
+	if !exists || role != "student" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Only students can view their submissions"})
+		return
+	}
+
+	userIDInt, ok := userID.(int)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid user ID type"})
+		return
+	}
+
+	submissionID, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid submission ID"})
+		return
+	}
+
+	db := c.MustGet("db").(*sql.DB)
+
+	// Fetch the student_id for the user
+	var studentID int
+	err = db.QueryRow(`
+		SELECT student_id FROM student 
+		WHERE user_id = ? AND archive_delete_flag = TRUE`, userIDInt).Scan(&studentID)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Student not found"})
+		return
+	} else if err != nil {
+		log.Printf("Error querying student: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch student: " + err.Error()})
+		return
+	}
+
+	// Fetch the submission
+	var submission models.Submission
+	var score sql.NullInt64
+	var feedback sql.NullString
+	err = db.QueryRow(`
+		SELECT submission_id, assignment_id, student_id, content, submitted_at, score, feedback, status
+		FROM submission 
+		WHERE submission_id = ? AND student_id = ? AND archive_delete_flag = TRUE`,
+		submissionID, studentID).Scan(
+		&submission.SubmissionID,
+		&submission.AssignmentID,
+		&submission.StudentID,
+		&submission.Content,
+		&submission.SubmittedAt,
+		&score,
+		&feedback,
+		&submission.Status,
+	)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Submission not found or unauthorized"})
+		return
+	} else if err != nil {
+		log.Printf("Error querying submission: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch submission: " + err.Error()})
+		return
+	}
+
+	// Handle nullable fields
+	if score.Valid {
+		scoreValue := int(score.Int64)
+		submission.Score = &scoreValue
+	}
+	if feedback.Valid {
+		feedbackValue := feedback.String
+		submission.Feedback = &feedbackValue
+	}
+
+	c.JSON(http.StatusOK, submission)
+}
+
+// GetStudentSubmissionsHandler retrieves all submissions for a student
+func GetStudentSubmissionsHandler(c *gin.Context) {
+	userID, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found in context"})
+		return
+	}
+	role, exists := c.Get("role")
+	if !exists || role != "student" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Only students can view their submissions"})
+		return
+	}
+
+	userIDInt, ok := userID.(int)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid user ID type"})
+		return
+	}
+
+	db := c.MustGet("db").(*sql.DB)
+
+	// Fetch the student_id for the user
+	var studentID int
+	err := db.QueryRow(`
+		SELECT student_id FROM student 
+		WHERE user_id = ? AND archive_delete_flag = TRUE`, userIDInt).Scan(&studentID)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Student not found"})
+		return
+	} else if err != nil {
+		log.Printf("Error querying student: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch student: " + err.Error()})
+		return
+	}
+
+	// Fetch all submissions for the student
+	rows, err := db.Query(`
+		SELECT submission_id, assignment_id, student_id, content, submitted_at, score, feedback, status
+		FROM submission 
+		WHERE student_id = ? AND archive_delete_flag = TRUE`, studentID)
+	if err != nil {
+		log.Printf("Error querying submissions: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch submissions: " + err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	var submissions []models.Submission
+	for rows.Next() {
+		var s models.Submission
+		var score sql.NullInt64
+		var feedback sql.NullString
+		if err := rows.Scan(&s.SubmissionID, &s.AssignmentID, &s.StudentID, &s.Content, &s.SubmittedAt, &score, &feedback, &s.Status); err != nil {
+			log.Printf("Error scanning submission: %v", err)
+			continue
+		}
+		if score.Valid {
+			scoreValue := int(score.Int64)
+			s.Score = &scoreValue
+		}
+		if feedback.Valid {
+			feedbackValue := feedback.String
+			s.Feedback = &feedbackValue
+		}
+		submissions = append(submissions, s)
+	}
+
+	if err = rows.Err(); err != nil {
+		log.Printf("Error iterating submissions: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to iterate submissions: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, submissions)
 }

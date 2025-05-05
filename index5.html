@@ -389,6 +389,106 @@
       }
     }
 
+    async function createAnnouncement() {
+      const data = {
+        course_id: parseInt(document.getElementById('announceCourseId').value),
+        title: document.getElementById('announceTitle').value.trim(),
+        content: document.getElementById('announceContent').value.trim() || null,
+        is_pinned: document.getElementById('announceIsPinned').checked
+      };
+      if (isNaN(data.course_id) || !data.title) {
+        alert('Course ID and title are required');
+        return;
+      }
+      try {
+        const result = await apiFetch('/announcements', 'POST', data);
+        alert('Announcement created: ' + JSON.stringify(result));
+        document.getElementById('announcementForm').reset();
+      } catch (error) {
+        alert('Announcement creation failed: ' + error.message);
+      }
+    }
+
+    async function fetchAnnouncementsByClassroom() {
+      const courseId = parseInt(document.getElementById('fetchAnnounceCourseId').value);
+      if (isNaN(courseId) || courseId <= 0) {
+        alert('Valid Course ID is required');
+        return;
+      }
+      try {
+        const announcements = await apiFetch(`/classrooms/${courseId}/announcements`, 'GET');
+        const container = document.getElementById('announcementsData');
+        container.innerHTML = '';
+
+        if (!announcements || announcements.length === 0) {
+          container.innerText = 'No announcements found for this classroom.';
+          return;
+        }
+
+        const ul = document.createElement('ul');
+        ul.className = 'space-y-2';
+
+        announcements.forEach(announcement => {
+          const li = document.createElement('li');
+          const createdAtFormatted = formatDate(announcement.created_at);
+          const pinnedClass = announcement.is_pinned ? 'bg-yellow-100' : 'bg-gray-50';
+          li.className = `p-2 ${pinnedClass} rounded`;
+          li.innerHTML = `
+            <div><strong>Announcement ID:</strong> ${announcement.announcement_id}</div>
+            <div><strong>Course ID:</strong> ${announcement.course_id}</div>
+            <div><strong>Title:</strong> ${announcement.title}</div>
+            <div><strong>Content:</strong> ${announcement.content || 'N/A'}</div>
+            <div><strong>Created At:</strong> ${createdAtFormatted}</div>
+            <div><strong>Is Pinned:</strong> ${announcement.is_pinned ? 'Yes' : 'No'}</div>
+          `;
+          ul.appendChild(li);
+        });
+
+        container.appendChild(ul);
+      } catch (error) {
+        alert('Announcements fetch failed: ' + error.message);
+      }
+    }
+
+    async function updateAnnouncement() {
+      const id = parseInt(document.getElementById('updateAnnounceId').value);
+      const data = {
+        title: document.getElementById('updateAnnounceTitle').value.trim(),
+        content: document.getElementById('updateAnnounceContent').value.trim() || null,
+        is_pinned: document.getElementById('updateAnnounceIsPinned').checked
+      };
+      if (isNaN(id) || id <= 0) {
+        alert('Valid Announcement ID is required');
+        return;
+      }
+      if (!data.title) {
+        alert('Title is required');
+        return;
+      }
+      try {
+        const result = await apiFetch(`/announcements/${id}`, 'PUT', data);
+        alert('Announcement updated: ' + JSON.stringify(result));
+        document.getElementById('updateAnnouncementForm').reset();
+      } catch (error) {
+        alert('Announcement update failed: ' + error.message);
+      }
+    }
+
+    async function deleteAnnouncement() {
+      const id = parseInt(document.getElementById('deleteAnnounceId').value);
+      if (isNaN(id) || id <= 0) {
+        alert('Valid Announcement ID is required');
+        return;
+      }
+      try {
+        const result = await apiFetch(`/announcements/${id}`, 'DELETE');
+        alert('Announcement deleted: ' + result.message);
+        document.getElementById('deleteAnnounceId').value = '';
+      } catch (error) {
+        alert('Announcement deletion failed: ' + error.message);
+      }
+    }
+
     async function createAssignment() {
       const data = {
         course_id: parseInt(document.getElementById('assignCourseId').value),
@@ -820,6 +920,39 @@
       <h3>Delete Classroom</h3>
       <input id="deleteClassId" type="number" placeholder="Course ID" class="border p-2 mb-2 w-full"><br>
       <button onclick="deleteClassroom()" class="bg-red-500 text-white p-2 rounded">Delete</button>
+    </div>
+
+    <div class="bg-white p-4 rounded shadow">
+      <h2 class="text-xl">Announcement Management</h2>
+      <h3>Create Announcement</h3>
+      <form id="announcementForm">
+        <input id="announceCourseId" type="number" placeholder="Course ID" class="border p-2 mb-2 w-full">
+        <input id="announceTitle" placeholder="Title" class="border p-2 mb-2 w-full">
+        <textarea id="announceContent" placeholder="Content" class="border p-2 mb-2 w-full"></textarea>
+        <label class="inline-flex items-center mb-2">
+          <input id="announceIsPinned" type="checkbox" class="mr-2">
+          <span>Pin Announcement</span>
+        </label><br>
+        <button type="button" onclick="createAnnouncement()" class="bg-blue-500 text-white p-2 rounded">Create</button>
+      </form>
+      <h3>Get Announcements by Classroom</h3>
+      <input id="fetchAnnounceCourseId" type="number" placeholder="Course ID" class="border p-2 mb-2 w-full">
+      <button onclick="fetchAnnouncementsByClassroom()" class="bg-green-500 text-white p-2 rounded">Get Announcements</button>
+      <div id="announcementsData" class="mt-2"></div>
+      <h3>Update Announcement</h3>
+      <form id="updateAnnouncementForm">
+        <input id="updateAnnounceId" type="number" placeholder="Announcement ID" class="border p-2 mb-2 w-full">
+        <input id="updateAnnounceTitle" placeholder="Title" class="border p-2 mb-2 w-full">
+        <textarea id="updateAnnounceContent" placeholder="Content" class="border p-2 mb-2 w-full"></textarea>
+        <label class="inline-flex items-center mb-2">
+          <input id="updateAnnounceIsPinned" type="checkbox" class="mr-2">
+          <span>Pin Announcement</span>
+        </label><br>
+        <button type="button" onclick="updateAnnouncement()" class="bg-blue-500 text-white p-2 rounded">Update</button>
+      </form>
+      <h3>Delete Announcement</h3>
+      <input id="deleteAnnounceId" type="number" placeholder="Announcement ID" class="border p-2 mb-2 w-full">
+      <button onclick="deleteAnnouncement()" class="bg-red-500 text-white p-2 rounded">Delete</button>
     </div>
 
     <div class="bg-white p-4 rounded shadow">

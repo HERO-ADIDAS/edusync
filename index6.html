@@ -1,0 +1,733 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Edusync - Student Dashboard</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    const API_BASE_URL = 'http://localhost:8080/api';
+
+    // Utility functions
+    function getToken() {
+      return localStorage.getItem('token');
+    }
+
+    function setToken(token) {
+      localStorage.setItem('token', token);
+    }
+
+    function clearToken() {
+      localStorage.removeItem('token');
+      localStorage.removeItem('student_id');
+    }
+
+    async function apiFetch(endpoint, method, data = null) {
+      const token = getToken();
+      const headers = {
+        'Content-Type': 'application/json'
+      };
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+      const options = { method, headers };
+      if (data) options.body = JSON.stringify(data);
+      console.log(`Making ${method} request to ${API_BASE_URL}${endpoint}`, { data, headers });
+      const response = await fetch(`${API_BASE_URL}${endpoint}`, options);
+      
+      const bodyText = await response.text();
+      
+      if (!response.ok) {
+        let errorMessage = `Request failed (Status: ${response.status})`;
+        try {
+          const errorData = JSON.parse(bodyText);
+          errorMessage = errorData.error?.message || errorData.message || errorMessage;
+        } catch {
+          errorMessage = bodyText || errorMessage;
+        }
+        console.error(`Error in ${endpoint}: ${errorMessage}`);
+        throw new Error(`${errorMessage} (Status: ${response.status})`);
+      }
+      
+      let result;
+      try {
+        result = bodyText ? JSON.parse(bodyText) : {};
+      } catch {
+        throw new Error('Failed to parse response as JSON');
+      }
+
+      console.log(`Response from ${endpoint}:`, result);
+      return result;
+    }
+
+    function formatDate(isoDate) {
+      const date = new Date(isoDate);
+      return date.toLocaleString('en-US', {
+        month: 'long',
+        day: 'numeric',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false
+      });
+    }
+
+    function getRelativeTime(isoDate) {
+      const now = new Date();
+      const dueDate = new Date(isoDate);
+      const diffMs = dueDate - now;
+      const diffSeconds = Math.round(diffMs / 1000);
+      const diffMinutes = Math.round(diffSeconds / 60);
+      const diffHours = Math.round(diffMinutes / 60);
+      const diffDays = Math.round(diffHours / 24);
+
+      if (diffSeconds < 0) {
+        const absSeconds = Math.abs(diffSeconds);
+        const absMinutes = Math.abs(diffMinutes);
+        const absHours = Math.abs(diffHours);
+        const absDays = Math.abs(diffDays);
+        if (absSeconds < 60) return `${absSeconds} seconds overdue`;
+        if (absMinutes < 60) return `${absMinutes} minutes overdue`;
+        if (absHours < 24) return `${absHours} hours overdue`;
+        return `${absDays} days overdue`;
+      } else {
+        if (diffSeconds < 60) return `due in ${diffSeconds} seconds`;
+        if (diffMinutes < 60) return `due in ${diffMinutes} minutes`;
+        if (diffHours < 24) return `due in ${diffHours} hours`;
+        return `due in ${diffDays} days`;
+      }
+    }
+
+    function isDueDateOver(dueDate) {
+      const now = new Date();
+      const due = new Date(dueDate);
+      console.log(`Checking due date: now=${now.toISOString()}, due=${due.toISOString()}`);
+      return now > due;
+    }
+
+    async function handleRegister() {
+      const role = document.getElementById('regRole').value;
+      const enrollmentYearInput = document.getElementById('regYear').value.trim();
+      const data = {
+        name: document.getElementById('regName').value.trim(),
+        email: document.getElementById('regEmail').value.trim(),
+        password: document.getElementById('regPassword').value,
+        role: role,
+        contact_number: document.getElementById('regContact').value.trim() || null,
+        profile_picture: null,
+        org: document.getElementById('regOrg').value.trim() || null,
+        grade_level: role === 'student' ? (document.getElementById('regGrade').value.trim() || null) : null,
+        enrollment_year: role === 'student' ? (enrollmentYearInput ? parseInt(enrollmentYearInput) : null) : null,
+        dept: role === 'teacher' ? (document.getElementById('regDept').value.trim() || null) : null
+      };
+
+      if (!data.name || !data.email || !data.password) {
+        alert('Name, email, and password are required');
+        return;
+      }
+
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(data.email)) {
+        alert('Please enter a valid email address (e.g., user@example.com)');
+        return;
+      }
+
+      const passwordRegex = /^(?=.*[A-Za-z])(?=.*\d)[A-Za-z\d]{8,}$/;
+      if (!passwordRegex.test(data.password)) {
+        alert('Password must be at least 8 characters long and contain at least one letter and one number');
+        return;
+      }
+
+      if (role === 'student' && enrollmentYearInput && (isNaN(data.enrollment_year) || data.enrollment_year <= 0)) {
+        alert('Enrollment year must be a valid positive integer (e.g., 2023)');
+        return;
+      }
+
+      try {
+        const result = await apiFetch('/register', 'POST', data);
+        alert('Registration successful: ' + result.message);
+        document.getElementById('registerForm').reset();
+      } catch (error) {
+        alert('Registration failed: ' + error.message);
+      }
+    }
+
+    async function handleLogin() {
+      const data = {
+        email: document.getElementById('loginEmail').value.trim(),
+        password: document.getElementById('loginPassword').value
+      };
+      if (!data.email || !data.password) {
+        alert('Email and password are required');
+        return;
+      }
+      try {
+        const result = await apiFetch('/login', 'POST', data);
+        if (!result.token) {
+          throw new Error('No token received from login');
+        }
+        setToken(result.token);
+        const profile = await apiFetch('/profile', 'GET');
+        console.log('Profile response:', profile);
+        if (!profile.user || profile.user.role !== 'student') {
+          clearToken();
+          throw new Error('User is not a student');
+        }
+        const studentId = profile.student?.student_id || profile.user.user_id;
+        if (!studentId || isNaN(studentId) || studentId <= 0) {
+          clearToken();
+          throw new Error('Invalid student ID received from profile');
+        }
+        localStorage.setItem('student_id', studentId);
+        alert('Login successful');
+        document.getElementById('loginForm').reset();
+        updateUI();
+        await loadStudentEnrollments();
+        await fetchStudentDashboard();
+      } catch (error) {
+        console.error('Login error:', error);
+        alert(`Login failed: ${error.message}`);
+      }
+    }
+
+    function handleLogout() {
+      clearToken();
+      updateUI();
+      alert('Logged out');
+    }
+
+    async function fetchProfile() {
+      try {
+        const profile = await apiFetch('/profile', 'GET');
+        document.getElementById('profileData').innerText = JSON.stringify(profile, null, 2);
+      } catch (error) {
+        alert(`Profile fetch failed: ${error.message}`);
+      }
+    }
+
+    async function updateStudentProfile() {
+      const data = {
+        grade_level: document.getElementById('updateGradeLevel').value.trim() || null,
+        enrollment_year: document.getElementById('updateEnrollmentYear').value.trim() ? parseInt(document.getElementById('updateEnrollmentYear').value) : null
+      };
+      if (!data.grade_level || !data.enrollment_year) {
+        alert('Grade level and enrollment year are required');
+        return;
+      }
+      if (data.enrollment_year <= 0 || isNaN(data.enrollment_year)) {
+        alert('Enrollment year must be a valid positive integer');
+        return;
+      }
+      try {
+        const result = await apiFetch('/student/profile', 'PUT', data);
+        alert('Student profile updated: ' + result.message);
+        document.getElementById('updateStudentProfileForm').reset();
+        fetchProfile();
+      } catch (error) {
+        alert(`Student profile update failed: ${error.message}`);
+      }
+    }
+
+    async function fetchStudentDashboard() {
+      try {
+        const dashboard = await apiFetch('/student/dashboard', 'GET');
+        console.log('Student Dashboard response:', dashboard);
+        const container = document.getElementById('dashboardData');
+        container.innerHTML = '';
+        
+        if (!dashboard || !dashboard.courses || dashboard.courses.length === 0) {
+          container.innerText = 'No enrolled courses found.';
+          return;
+        }
+
+        const ul = document.createElement('ul');
+        ul.className = 'space-y-2';
+        dashboard.courses.forEach(course => {
+          console.log(`Course ${course.course_id} data:`, {
+            teacher_name: course.teacher_name,
+            subject_area: course.subject_area,
+            upcoming_assignments: course.upcoming_assignments
+          });
+          const teacherName = course.teacher_name && course.teacher_name.trim() !== '' ? course.teacher_name : 'Teacher not assigned';
+          const subjectArea = course.subject_area && course.subject_area.trim() !== '' ? course.subject_area : 'N/A';
+          const upcomingAssignments = typeof course.upcoming_assignments === 'number' && course.upcoming_assignments >= 0 ? course.upcoming_assignments : 0;
+
+          const li = document.createElement('li');
+          li.className = 'p-2 bg-gray-50 rounded';
+          li.innerHTML = `
+            <div><strong>Course:</strong> ${course.title}</div>
+            <div><strong>Course ID:</strong> ${course.course_id}</div>
+            <div><strong>Teacher:</strong> ${teacherName}</div>
+            <div><strong>Subject:</strong> ${subjectArea}</div>
+            <div><strong>Upcoming Assignments:</strong> ${upcomingAssignments}</div>
+          `;
+          ul.appendChild(li);
+        });
+        container.appendChild(ul);
+      } catch (error) {
+        alert(`Dashboard fetch failed: ${error.message}`);
+      }
+    }
+
+    async function loadStudentEnrollments() {
+      const enrollmentsSelect = document.getElementById('enrollmentsSelect');
+      const enrollMessage = document.getElementById('enrollMessage');
+
+      if (!enrollmentsSelect || !enrollMessage) {
+        console.error('DOM elements not found: enrollmentsSelect or enrollMessage');
+        return;
+      }
+
+      enrollMessage.textContent = 'Loading enrollments...';
+
+      try {
+        const enrollments = await apiFetch('/student/enrollments', 'GET');
+        enrollmentsSelect.innerHTML = '<option value="">Select a Course</option>';
+        if (!enrollments || enrollments.length === 0) {
+          enrollMessage.textContent = 'No enrollments found. Please enroll in a course.';
+          enrollmentsSelect.disabled = true;
+        } else {
+          enrollments.forEach(enrollment => {
+            const teacherInfo = enrollment.teacher_name && enrollment.teacher_name.trim() !== '' ? ` - ${enrollment.teacher_name}` : ' - No teacher assigned';
+            const option = document.createElement('option');
+            option.value = enrollment.course_id;
+            option.textContent = `${enrollment.title} (Course ID: ${enrollment.course_id}${teacherInfo})`;
+            enrollmentsSelect.appendChild(option);
+          });
+          enrollMessage.textContent = '';
+          enrollmentsSelect.disabled = false;
+        }
+      } catch (error) {
+        enrollMessage.textContent = `Failed to load enrollments: ${error.message}`;
+        enrollmentsSelect.disabled = true;
+      }
+    }
+
+    async function enrollStudent() {
+      const courseId = parseInt(document.getElementById('enrollCourseId').value);
+      const teacherName = document.getElementById('enrollTeacherName').value.trim();
+      
+      if (isNaN(courseId) || courseId <= 0) {
+        alert('Valid Course ID is required');
+        return;
+      }
+      if (!teacherName) {
+        alert('Teacher name is required');
+        return;
+      }
+
+      try {
+        const result = await apiFetch('/enroll', 'POST', { 
+          course_id: courseId,
+          teacher_name: teacherName 
+        });
+        const teacherInfo = result.teacher_name && result.teacher_name.trim() !== '' ? result.teacher_name : 'No teacher assigned';
+        alert(`Enrollment successful: ${result.message}\nEnrolled in "${result.course_title}" (Course ID: ${result.course_id}) with teacher: ${teacherInfo}`);
+        document.getElementById('enrollCourseId').value = '';
+        document.getElementById('enrollTeacherName').value = '';
+        loadStudentEnrollments();
+        fetchStudentDashboard();
+      } catch (error) {
+        if (error.message.includes('No classroom exists')) {
+          alert('No classroom exists with this Course ID. Please check the ID and try again.');
+        } else if (error.message.includes('Teacher does not match the course')) {
+          alert('The teacher name does not match the course. Please check the teacher name and try again.');
+        } else {
+          alert(`Enrollment failed: ${error.message}`);
+        }
+      }
+    }
+
+    async function fetchCourseDetails() {
+      const courseId = parseInt(document.getElementById('enrollmentsSelect').value);
+      const container = document.getElementById('courseDetailsData');
+      const errorDiv = document.getElementById('courseError');
+      container.innerHTML = '';
+      errorDiv.textContent = '';
+
+      if (isNaN(courseId) || courseId <= 0) {
+        errorDiv.textContent = 'Please select a valid course.';
+        return;
+      }
+
+      try {
+        const course = await apiFetch(`/classrooms/${courseId}`, 'GET');
+        container.innerHTML = `
+          <div><strong>Title:</strong> ${course.title}</div>
+          <div><strong>Description:</strong> ${course.description || 'N/A'}</div>
+          <div><strong>Subject Area:</strong> ${course.subject_area || 'N/A'}</div>
+          <div><strong>Start Date:</strong> ${course.start_date ? formatDate(course.start_date) : 'N/A'}</div>
+          <div><strong>End Date:</strong> ${course.end_date ? formatDate(course.end_date) : 'N/A'}</div>
+        `;
+      } catch (error) {
+        errorDiv.textContent = `Failed to load course details: ${error.message}`;
+      }
+    }
+
+    async function fetchAssignmentsByCourse() {
+      const courseId = parseInt(document.getElementById('enrollmentsSelect').value);
+      const container = document.getElementById('assignmentsData');
+      const errorDiv = document.getElementById('courseError');
+      container.innerHTML = '';
+      errorDiv.textContent = '';
+
+      if (isNaN(courseId) || courseId <= 0) {
+        errorDiv.textContent = 'Please select a valid course.';
+        return;
+      }
+
+      try {
+        const assignments = await apiFetch(`/classrooms/${courseId}/assignments`, 'GET');
+        if (!assignments || assignments.length === 0) {
+          container.innerText = 'No assignments found for this course.';
+          return;
+        }
+
+        const ul = document.createElement('ul');
+        ul.className = 'space-y-2';
+        assignments.forEach(assignment => {
+          const li = document.createElement('li');
+          li.className = 'p-2 bg-gray-50 rounded';
+          const dueDateFormatted = formatDate(assignment.due_date);
+          const relativeTime = getRelativeTime(assignment.due_date);
+          const now = new Date();
+          const dueDate = new Date(assignment.due_date);
+          const diffHours = (dueDate - now) / (1000 * 60 * 60);
+          let timeClass = diffHours < 0 ? 'text-red-500 font-bold' : diffHours <= 24 ? 'text-orange-500 font-bold' : 'text-green-500';
+          li.innerHTML = `
+            <div><strong>Assignment ID:</strong> ${assignment.assignment_id}</div>
+            <div><strong>Title:</strong> ${assignment.title}</div>
+            <div><strong>Due Date:</strong> ${dueDateFormatted} <span class="${timeClass}">(${relativeTime})</span></div>
+            <div><strong>Max Points:</strong> ${assignment.max_points}</div>
+            <div><strong>Description:</strong> ${assignment.description || 'N/A'}</div>
+          `;
+          ul.appendChild(li);
+        });
+        container.appendChild(ul);
+      } catch (error) {
+        errorDiv.textContent = `Failed to load assignments: ${error.message}`;
+      }
+    }
+
+    async function fetchMaterialsByCourse() {
+      const courseId = parseInt(document.getElementById('enrollmentsSelect').value);
+      const container = document.getElementById('materialsData');
+      const errorDiv = document.getElementById('courseError');
+      container.innerHTML = '';
+      errorDiv.textContent = '';
+
+      if (isNaN(courseId) || courseId <= 0) {
+        errorDiv.textContent = 'Please select a valid course.';
+        return;
+      }
+
+      try {
+        const materials = await apiFetch(`/classrooms/${courseId}/materials`, 'GET');
+        if (!materials || materials.length === 0) {
+          container.innerText = 'No materials found for this course.';
+          return;
+        }
+
+        const ul = document.createElement('ul');
+        ul.className = 'space-y-2';
+        materials.forEach(material => {
+          const li = document.createElement('li');
+          li.className = 'p-2 bg-gray-50 rounded';
+          li.innerHTML = `
+            <div><strong>Title:</strong> ${material.title}</div>
+            <div><strong>Type:</strong> ${material.type || 'N/A'}</div>
+            <div><strong>File Path:</strong> ${material.file_path || 'N/A'}</div>
+            <div><strong>Description:</strong> ${material.description || 'N/A'}</div>
+            <div><strong>Uploaded At:</strong> ${formatDate(material.uploaded_at)}</div>
+          `;
+          ul.appendChild(li);
+        });
+        container.appendChild(ul);
+      } catch (error) {
+        errorDiv.textContent = `Failed to load materials: ${error.message}`;
+      }
+    }
+
+    async function fetchAnnouncementsByCourse() {
+      const courseId = parseInt(document.getElementById('enrollmentsSelect').value);
+      const container = document.getElementById('announcementsData');
+      const errorDiv = document.getElementById('courseError');
+      container.innerHTML = '';
+      errorDiv.textContent = '';
+
+      if (isNaN(courseId) || courseId <= 0) {
+        errorDiv.textContent = 'Please select a valid course.';
+        return;
+      }
+
+      try {
+        const announcements = await apiFetch(`/classrooms/${courseId}/announcements`, 'GET');
+        if (!announcements || announcements.length === 0) {
+          container.innerText = 'No announcements found for this course.';
+          return;
+        }
+
+        const ul = document.createElement('ul');
+        ul.className = 'space-y-2';
+        announcements.forEach(announcement => {
+          const li = document.createElement('li');
+          li.className = 'p-2 bg-gray-50 rounded';
+          li.innerHTML = `
+            <div><strong>Title:</strong> ${announcement.title}</div>
+            <div><strong>Content:</strong> ${announcement.content || 'N/A'}</div>
+            <div><strong>Created At:</strong> ${formatDate(announcement.created_at)}</div>
+            <div><strong>Pinned:</strong> ${announcement.is_pinned ? 'Yes' : 'No'}</div>
+          `;
+          ul.appendChild(li);
+        });
+        container.appendChild(ul);
+      } catch (error) {
+        errorDiv.textContent = `Failed to load announcements: ${error.message}`;
+      }
+    }
+
+    async function createSubmission() {
+      const assignmentId = parseInt(document.getElementById('submitAssignId').value);
+      const content = document.getElementById('submitContent').value.trim() || null;
+      if (isNaN(assignmentId) || assignmentId <= 0) {
+        alert('Valid Assignment ID is required');
+        return;
+      }
+
+      try {
+        const data = { assignment_id: assignmentId, content };
+        const result = await apiFetch('/submissions', 'POST', data);
+        alert('Submission created: ' + (result.message || 'Success'));
+        document.getElementById('submissionForm').reset();
+        fetchSubmissionsByCourse();
+      } catch (error) {
+        console.error('Create submission error:', error);
+        alert(`Submission failed: ${error.message}`);
+      }
+    }
+
+    async function updateSubmission() {
+      const submissionId = parseInt(document.getElementById('updateSubmitId').value);
+      const content = document.getElementById('updateSubmitContent').value.trim() || null;
+      if (isNaN(submissionId) || submissionId <= 0) {
+        alert('Valid Submission ID is required');
+        return;
+      }
+
+      try {
+        const data = { content };
+        const result = await apiFetch(`/submissions/${submissionId}`, 'PUT', data);
+        alert('Submission updated: ' + (result.message || 'Success'));
+        document.getElementById('updateSubmissionForm').reset();
+        fetchSubmissionsByCourse();
+      } catch (error) {
+        console.error('Update submission error:', error);
+        alert(`Submission update failed: ${error.message}`);
+      }
+    }
+
+    async function fetchSubmissionsByCourse() {
+      const courseId = parseInt(document.getElementById('enrollmentsSelect').value);
+      const container = document.getElementById('submissionsData');
+      const errorDiv = document.getElementById('courseError');
+      container.innerHTML = '';
+      errorDiv.textContent = '';
+
+      if (isNaN(courseId) || courseId <= 0) {
+        errorDiv.textContent = 'Please select a valid course.';
+        return;
+      }
+
+      const studentId = parseInt(localStorage.getItem('student_id'));
+      if (isNaN(studentId) || studentId <= 0) {
+        errorDiv.textContent = 'Invalid student ID. Please log in again.';
+        console.error('Invalid student_id in localStorage:', localStorage.getItem('student_id'));
+        return;
+      }
+
+      let assignments = [];
+      try {
+        assignments = await apiFetch(`/classrooms/${courseId}/assignments`, 'GET');
+        console.log(`Assignments for course ${courseId}:`, assignments);
+        if (!assignments || assignments.length === 0) {
+          container.innerText = 'No assignments found for this course.';
+          return;
+        }
+      } catch (error) {
+        errorDiv.textContent = `Failed to load assignments for course ${courseId}: ${error.message}`;
+        console.error(`Error fetching assignments for course ${courseId}:`, error);
+        return;
+      }
+
+      const ul = document.createElement('ul');
+      ul.className = 'space-y-2';
+      let hasSubmissions = false;
+
+      for (const assignment of assignments) {
+        let submissions = [];
+        try {
+          submissions = await apiFetch(`/assignments/${assignment.assignment_id}/submissions`, 'GET');
+          console.log(`Submissions for assignment ${assignment.assignment_id}:`, submissions);
+        } catch (err) {
+          console.error(`Failed to fetch submissions for assignment ${assignment.assignment_id}: ${err.message}`);
+          continue;
+        }
+
+        const studentSubmissions = Array.isArray(submissions) ? submissions.filter(sub => sub.student_id === studentId) : [];
+        const dueDateOver = isDueDateOver(assignment.due_date);
+
+        studentSubmissions.forEach(submission => {
+          hasSubmissions = true;
+          const li = document.createElement('li');
+          li.className = 'p-2 bg-gray-50 rounded';
+          li.innerHTML = `
+            <div><strong>Assignment:</strong> ${assignment.title}</div>
+            <div><strong>Assignment ID:</strong> ${assignment.assignment_id}</div>
+            <div><strong>Submission ID:</strong> ${submission.submission_id}</div>
+            <div><strong>Content:</strong> ${submission.content || 'N/A'}</div>
+            <div><strong>Submitted At:</strong> ${formatDate(submission.submitted_at)}</div>
+            <div><strong>Score:</strong> ${submission.score || 'Not graded'}</div>
+            <div><strong>Feedback:</strong> ${submission.feedback || 'N/A'}</div>
+            <div><strong>Status:</strong> ${submission.status}</div>
+          `;
+          if (dueDateOver) {
+            li.innerHTML += `<div><strong>Notice:</strong> Due date is over. You submitted on time.</div>`;
+          }
+          ul.appendChild(li);
+        });
+      }
+
+      if (!hasSubmissions) {
+        container.innerText = 'No submissions found for this course.';
+      } else {
+        container.appendChild(ul);
+      }
+    }
+
+    function updateUI() {
+      const token = getToken();
+      document.getElementById('authSection').style.display = token ? 'none' : 'block';
+      document.getElementById('protectedSection').style.display = token ? 'block' : 'none';
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+      document.getElementById('regRole').addEventListener('change', function() {
+        const role = this.value;
+        document.getElementById('regGrade').style.display = role === 'student' ? 'block' : 'none';
+        document.getElementById('regYear').style.display = role === 'student' ? 'block' : 'none';
+        document.getElementById('regDept').style.display = role === 'teacher' ? 'block' : 'none';
+      });
+      updateUI();
+    });
+  </script>
+</head>
+<body class="bg-gray-100 p-6">
+  <div id="authSection" class="space-y-6">
+    <h1 class="text-2xl font-bold">Edusync - Authentication</h1>
+
+    <div class="bg-white p-4 rounded shadow">
+      <h2 class="text-xl">Register</h2>
+      <form id="registerForm">
+        <input id="regName" placeholder="Name" class="border p-2 mb-2 w-full"><br>
+        <input id="regEmail" type="email" placeholder="Email" class="border p-2 mb-2 w-full"><br>
+        <input id="regPassword" type="password" placeholder="Password" class="border p-2 mb-2 w-full"><br>
+        <select id="regRole" class="border p-2 mb-2 w-full">
+          <option value="student">Student</option>
+          <option value="teacher">Teacher</option>
+        </select><br>
+        <input id="regContact" placeholder="Contact Number" class="border p-2 mb-2 w-full"><br>
+        <input id="regOrg" placeholder="Organization" class="border p-2 mb-2 w-full"><br>
+        <input id="regGrade" placeholder="Grade Level" class="border p-2 mb-2 w-full" style="display:none"><br>
+        <input id="regYear" type="number" placeholder="Enrollment Year" class="border p-2 mb-2 w-full" style="display:none"><br>
+        <input id="regDept" placeholder="Department" class="border p-2 mb-2 w-full" style="display:none"><br>
+        <button type="button" onclick="handleRegister()" class="bg-blue-500 text-white p-2 rounded">Register</button>
+      </form>
+    </div>
+
+    <div class="bg-white p-4 rounded shadow">
+      <h2 class="text-xl">Login</h2>
+      <form id="loginForm">
+        <input id="loginEmail" type="email" placeholder="Email" class="border p-2 mb-2 w-full"><br>
+        <input id="loginPassword" type="password" placeholder="Password" class="border p-2 mb-2 w-full"><br>
+        <button type="button" onclick="handleLogin()" class="bg-blue-500 text-white p-2 rounded">Login</button>
+      </form>
+    </div>
+  </div>
+
+  <div id="protectedSection" class="space-y-6 hidden">
+    <h1 class="text-2xl font-bold">Edusync - Student Dashboard</h1>
+    <button onclick="handleLogout()" class="bg-red-500 text-white p-2 rounded">Logout</button>
+
+    <div class="bg-white p-4 rounded shadow">
+      <h2 class="text-xl">User Profile</h2>
+      <button onclick="fetchProfile()" class="bg-green-500 text-white p-2 rounded">Get Profile</button>
+      <pre id="profileData" class="mt-2"></pre>
+    </div>
+
+    <div class="bg-white p-4 rounded shadow">
+      <h2 class="text-xl">Student Profile Management</h2>
+      <h3>Update Student Profile</h3>
+      <form id="updateStudentProfileForm">
+        <input id="updateGradeLevel" placeholder="Grade Level" class="border p-2 mb-2 w-full"><br>
+        <input id="updateEnrollmentYear" type="number" placeholder="Enrollment Year" class="border p-2 mb-2 w-full"><br>
+        <button type="button" onclick="updateStudentProfile()" class="bg-blue-500 text-white p-2 rounded">Update</button>
+      </form>
+    </div>
+
+    <div class="bg-white p-4 rounded shadow">
+      <h2 class="text-xl">Student Dashboard</h2>
+      <button onclick="fetchStudentDashboard()" class="bg-green-500 text-white p-2 rounded">Get Dashboard</button>
+      <div id="dashboardData" class="mt-2"></div>
+    </div>
+
+    <div class="bg-white p-4 rounded shadow">
+      <h2 class="text-xl">Course Management</h2>
+      <div id="enrollMessage" class="text-gray-600 mb-2"></div>
+      <select id="enrollmentsSelect" onchange="fetchCourseDetails(); fetchAssignmentsByCourse(); fetchMaterialsByCourse(); fetchAnnouncementsByCourse(); fetchSubmissionsByCourse()" class="border p-2 mb-2 w-full">
+        <option value="">Select a Course</option>
+      </select>
+      <button onclick="loadStudentEnrollments()" class="bg-blue-500 text-white p-2 rounded mt-2">Refresh Enrollments</button>
+      <h3 class="mt-4">Enroll in a Course</h3>
+      <p class="text-sm text-gray-500 mb-2">Enter the Course ID and the exact Teacher Name to enroll.</p>
+      <form id="enrollForm" class="space-y-2">
+        <div>
+          <label for="enrollCourseId" class="block text-sm font-medium text-gray-700">Course ID</label>
+          <input id="enrollCourseId" type="number" placeholder="Enter Course ID" class="border p-2 w-full rounded" required>
+        </div>
+        <div>
+          <label for="enrollTeacherName" class="block text-sm font-medium text-gray-700">Teacher Name</label>
+          <input id="enrollTeacherName" type="text" placeholder="Enter Teacher Name" class="border p-2 w-full rounded" required>
+        </div>
+        <button type="button" onclick="enrollStudent()" class="bg-blue-500 text-white p-2 rounded w-full">Enroll</button>
+      </form>
+      <h3 class="mt-4">Course Details</h3>
+      <div id="courseDetailsData" class="mt-2"></div>
+      <h3 class="mt-4">Assignments</h3>
+      <div id="assignmentsData" class="mt-2"></div>
+      <h3 class="mt-4">Materials</h3>
+      <div id="materialsData" class="mt-2"></div>
+      <h3 class="mt-4">Announcements</h3>
+      <div id="announcementsData" class="mt-2"></div>
+      <h3 class="mt-4">My Submissions</h3>
+      <div id="submissionsData" class="mt-2"></div>
+      <div id="courseError" class="mt-2 text-red-500"></div>
+    </div>
+
+    <div class="bg-white p-4 rounded shadow">
+      <h2 class="text-xl">Submission Management</h2>
+      <h3>Create Submission</h3>
+      <form id="submissionForm">
+        <input id="submitAssignId" type="number" placeholder="Assignment ID" class="border p-2 mb-2 w-full"><br>
+        <textarea id="submitContent" placeholder="Submission Content" class="border p-2 mb-2 w-full"></textarea><br>
+        <button type="button" onclick="createSubmission()" class="bg-blue-500 text-white p-2 rounded">Submit</button>
+      </form>
+      <h3>Update Submission</h3>
+      <form id="updateSubmissionForm">
+        <input id="updateSubmitId" type="number" placeholder="Submission ID" class="border p-2 mb-2 w-full"><br>
+        <textarea id="updateSubmitContent" placeholder="Submission Content" class="border p-2 mb-2 w-full"></textarea><br>
+        <button type="button" onclick="updateSubmission()" class="bg-blue-500 text-white p-2 rounded">Update</button>
+      </form>
+    </div>
+  </div>
+</body>
+</html>
