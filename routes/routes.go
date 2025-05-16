@@ -27,6 +27,8 @@ func SetupRoutes(r *gin.Engine) {
 	// General user routes
 	protected.GET("/profile", handlers.GetProfileHandler)
 	protected.GET("/auth/check", handlers.CheckAuthHandler)
+	protected.GET("/stats", handlers.GetUserStatsHandler)
+
 
 	// Teacher-specific routes
 	protected.POST("/classrooms", handlers.CreateClassroomHandler)
